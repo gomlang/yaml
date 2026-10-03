@@ -1,0 +1,166 @@
+package yaml;
+
+use std::serde::{Serialize};
+
+pub enum Value {
+    Null,
+    Bool(bool),
+    Integer(string),
+    Float(string),
+    String(string),
+    Sequence(Vec[Value]),
+    Mapping(Vec[(Value, Value)]),
+}
+
+impl Value {
+    pub fn field(self: Value, name: string) -> Option[Value] {
+        if let Value::Mapping(entries) = self {
+            for (key, value) in entries {
+                if key == Value::String(name) {
+                    return Option::Some(value)
+                }
+            }
+        }
+        Option::None
+    }
+
+    pub fn as_string(self: Value) -> Option[string] {
+        if let Value::String(value) = self {
+            Option::Some(value)
+        } else {
+            Option::None
+        }
+    }
+
+    pub fn as_sequence(self: Value) -> Option[Vec[Value]] {
+        if let Value::Sequence(values) = self {
+            Option::Some(values)
+        } else {
+            Option::None
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ErrorKind {
+    Syntax,
+    Limit,
+    DuplicateKey,
+    Alias,
+    Unsupported,
+    Argument,
+    Serde,
+    Bridge,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct Error {
+    pub kind: ErrorKind,
+    pub message: string,
+    pub line: isize,
+    pub column: isize,
+}
+
+impl ToString for Error {
+    fn to_string(self: Error) -> string {
+        if self.line > 0 {
+            self.message + " at line " + self.line.to_string() + ", column "
+                + self.column.to_string()
+        } else {
+            self.message
+        }
+    }
+}
+
+fn error(kind: ErrorKind, message: string) -> Error {
+    Error { kind, message, line: 0, column: 0 }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum DuplicateKeys {
+    Reject,
+    FirstWins,
+    LastWins,
+}
+
+#[derive(Serialize)]
+pub struct Limits {
+    pub max_input_bytes: isize,
+    pub max_depth: isize,
+    pub max_nodes: isize,
+    pub max_alias_expansions: isize,
+    pub max_decoded_bytes: isize,
+    pub max_documents: isize,
+    pub max_output_bytes: isize,
+}
+
+impl Limits {
+    pub fn standard() -> Limits {
+        Limits {
+            max_input_bytes: 1048576,
+            max_depth: 128,
+            max_nodes: 100000,
+            max_alias_expansions: 1000,
+            max_decoded_bytes: 4194304,
+            max_documents: 64,
+            max_output_bytes: 4194304,
+        }
+    }
+}
+
+pub struct Options {
+    pub limits: Limits,
+    pub duplicate_keys: DuplicateKeys,
+    pub indent: isize,
+}
+
+impl Options {
+    pub fn standard() -> Options {
+        Options { limits: Limits::standard(), duplicate_keys: DuplicateKeys::Reject, indent: 2 }
+    }
+}
+
+impl PartialEq for Value {
+    fn eq(self: Value, other: Value) -> bool {
+        match (self, other) {
+            (Value::Null, Value::Null) => true,
+            (Value::Bool(left), Value::Bool(right)) => left == right,
+            (Value::Integer(left), Value::Integer(right)) | (
+                Value::Float(left),
+                Value::Float(right),
+            ) | (Value::String(left), Value::String(right)) => left == right,
+            (Value::Sequence(left), Value::Sequence(right)) => {
+                if left.len() != right.len() {
+                    return false
+                }
+                for index in 0..left.len() {
+                    if left[index] != right[index] {
+                        return false
+                    }
+                }
+                true
+            },
+            (Value::Mapping(left), Value::Mapping(right)) => {
+                if left.len() != right.len() {
+                    return false
+                }
+                for index in 0..left.len() {
+                    if left[index].0 != right[index].0 || left[index].1 != right[index].1 {
+                        return false
+                    }
+                }
+                true
+            },
+            _ => false,
+        }
+    }
+}
+
+impl Debug for Value {
+    fn debug(self: Value) -> string {
+        match emit(self) {
+            Result::Ok(value) => value,
+            Result::Err(problem) => "invalid YAML value: " + problem.to_string(),
+        }
+    }
+}

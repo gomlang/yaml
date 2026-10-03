@@ -1,0 +1,232 @@
+package yaml;
+
+use module::bindings;
+use std::ffi;
+use std::json;
+use std::serde::{Serialize, Deserialize};
+
+#[derive(Serialize, Deserialize)]
+struct Token {
+    kind: string,
+    text: string,
+    size: isize,
+    line: isize,
+    column: isize,
+}
+
+#[derive(Deserialize)]
+struct Response {
+    kind: string,
+    message: string,
+    line: isize,
+    column: isize,
+    documents: isize,
+    tokens: Vec[Token],
+    output: string,
+}
+
+fn receive(raw: ffi::String) -> Result[Response, Error] {
+    let result: Response = json::from_string(
+        ffi::string_text(raw).map_err(|problem| error(ErrorKind::Bridge, problem.to_string()))?,
+    ).map_err(|message| error(ErrorKind::Bridge, message))?;
+    if result.kind != "" {
+        let kind = match result.kind {
+            "syntax" => ErrorKind::Syntax,
+            "limit" => ErrorKind::Limit,
+            "duplicate" => ErrorKind::DuplicateKey,
+            "alias" => ErrorKind::Alias,
+            "unsupported" => ErrorKind::Unsupported,
+            "argument" => ErrorKind::Argument,
+            _ => ErrorKind::Bridge,
+        };
+        return Result::Err(
+            Error { kind, message: result.message, line: result.line, column: result.column },
+        )
+    }
+    Result::Ok(result)
+}
+
+fn validate(options: Options) -> Result[(), Error] {
+    let limits = options.limits;
+    if limits.max_input_bytes < 0 || limits.max_input_bytes > 16777216 || limits.max_depth < 1
+        || limits.max_depth > 512
+        || limits.max_nodes < 1
+        || limits.max_nodes > 1000000
+        || limits.max_alias_expansions < 0
+        || limits.max_alias_expansions > 100000
+        || limits.max_decoded_bytes < 0
+        || limits.max_decoded_bytes > 67108864
+        || limits.max_documents < 1
+        || limits.max_documents > 10000
+        || limits.max_output_bytes < 0
+        || limits.max_output_bytes > 67108864
+        || options.indent < 1
+        || options.indent > 8 {
+        return Result::Err(error(ErrorKind::Argument, "YAML options outside supported bounds"))
+    }
+    Result::Ok(())
+}
+
+fn read_token(tokens: Vec[Token], position: Ref[isize]) -> Result[Value, Error] {
+    if position.get() >= tokens.len() {
+        return Result::Err(error(ErrorKind::Bridge, "truncated YAML bridge tokens"))
+    }
+    let token = tokens[position.get()];
+    position.set(position.get() + 1);
+    match token.kind {
+        "null" => Result::Ok(Value::Null),
+        "bool" => Result::Ok(Value::Bool(token.text == "true")),
+        "integer" => Result::Ok(Value::Integer(token.text)),
+        "float" => Result::Ok(Value::Float(token.text)),
+        "string" => Result::Ok(Value::String(token.text)),
+        "sequence" => {
+            let values = Vec::new();
+            for _ in 0..token.size {
+                values.push(read_token(tokens, position)?);
+            }
+            Result::Ok(Value::Sequence(values))
+        },
+        "mapping" => {
+            let entries = Vec::new();
+            for _ in 0..token.size {
+                let key = read_token(tokens, position)?;
+                entries.push((key, read_token(tokens, position)?));
+            }
+            Result::Ok(Value::Mapping(entries))
+        },
+        _ => Result::Err(error(ErrorKind::Bridge, "invalid YAML bridge token")),
+    }
+}
+
+pub fn parse_documents_with_options(input: string, options: Options) -> Result[Vec[Value], Error] {
+    validate(options)?;
+    if input.byte_len() > options.limits.max_input_bytes {
+        return Result::Err(error(ErrorKind::Limit, "YAML input exceeds max_input_bytes"))
+    }
+    let limits = json::try_to_string(options.limits).map_err(
+        |message| error(ErrorKind::Bridge, message),
+    )?;
+    let duplicates = match options.duplicate_keys {
+        DuplicateKeys::Reject => "reject",
+        DuplicateKeys::FirstWins => "first",
+        DuplicateKeys::LastWins => "last",
+    };
+    let response = receive(
+        bindings::parse(
+            ffi::string_from_text(input),
+            ffi::string_from_text(limits),
+            ffi::string_from_text(duplicates),
+        ),
+    )?;
+    let position = Ref::new(0);
+    let documents = Vec::new();
+    for _ in 0..response.documents {
+        documents.push(read_token(response.tokens, position)?);
+    }
+    if position.get() != response.tokens.len() {
+        return Result::Err(error(ErrorKind::Bridge, "trailing YAML bridge tokens"))
+    }
+    Result::Ok(documents)
+}
+
+pub fn parse_documents(input: string) -> Result[Vec[Value], Error] {
+    parse_documents_with_options(input, Options::standard())
+}
+
+pub fn parse_with_options(input: string, options: Options) -> Result[Value, Error] {
+    let values = parse_documents_with_options(input, options)?;
+    if values.is_empty() {
+        Result::Ok(Value::Null)
+    } else if values.len() == 1 {
+        Result::Ok(values[0])
+    } else {
+        Result::Err(error(ErrorKind::Syntax, "expected one YAML document"))
+    }
+}
+
+pub fn parse(input: string) -> Result[Value, Error] {
+    parse_with_options(input, Options::standard())
+}
+
+struct Budget {
+    limits: Limits,
+    bytes: Ref[isize],
+    tokens: Vec[Token],
+}
+
+fn write_token(value: Value, budget: Budget, depth: isize) -> Result[(), Error] {
+    if depth > budget.limits.max_depth || budget.tokens.len() >= budget.limits.max_nodes {
+        return Result::Err(error(ErrorKind::Limit, "YAML value exceeds depth or node limit"))
+    }
+    let (kind, text, size) = match value {
+        Value::Null => ("null", "", 0),
+        Value::Bool(value) => (
+            "bool",
+            if value {
+                "true"
+            } else {
+                "false"
+            },
+            0,
+        ),
+        Value::Integer(value) => ("integer", value, 0),
+        Value::Float(value) => ("float", value, 0),
+        Value::String(value) => ("string", value, 0),
+        Value::Sequence(values) => ("sequence", "", values.len()),
+        Value::Mapping(entries) => ("mapping", "", entries.len()),
+    };
+    if text.byte_len() > budget.limits.max_decoded_bytes - budget.bytes.get() {
+        return Result::Err(error(ErrorKind::Limit, "YAML scalar bytes exceed max_decoded_bytes"))
+    }
+    budget.bytes.set(budget.bytes.get() + text.byte_len());
+    budget.tokens.push(Token { kind, text, size, line: 0, column: 0 });
+    match value {
+        Value::Sequence(values) => for item in values {
+            write_token(item, budget, depth + 1)?;
+        },
+        Value::Mapping(entries) => for (key, item) in entries {
+            write_token(key, budget, depth + 1)?;
+            write_token(item, budget, depth + 1)?;
+        },
+        _ => (),
+    }
+    Result::Ok(())
+}
+
+pub fn emit_documents_with_options(values: Vec[Value], options: Options) -> Result[string, Error] {
+    validate(options)?;
+    if values.len() > options.limits.max_documents {
+        return Result::Err(error(ErrorKind::Limit, "YAML stream exceeds max_documents"))
+    }
+    let budget = Budget { limits: options.limits, bytes: Ref::new(0), tokens: Vec::new() };
+    for value in values {
+        write_token(value, budget, 1)?;
+    }
+    let tokens = json::try_to_string(budget.tokens).map_err(
+        |message| error(ErrorKind::Bridge, message),
+    )?;
+    let limits = json::try_to_string(options.limits).map_err(
+        |message| error(ErrorKind::Bridge, message),
+    )?;
+    let response = receive(
+        bindings::emit(
+            ffi::string_from_text(tokens),
+            ffi::string_from_text(limits),
+            values.len(),
+            options.indent,
+        ),
+    )?;
+    Result::Ok(response.output)
+}
+
+pub fn emit_documents(values: Vec[Value]) -> Result[string, Error] {
+    emit_documents_with_options(values, Options::standard())
+}
+
+pub fn emit_with_options(value: Value, options: Options) -> Result[string, Error] {
+    emit_documents_with_options(Vec::from_array([value]), options)
+}
+
+pub fn emit(value: Value) -> Result[string, Error] {
+    emit_with_options(value, Options::standard())
+}

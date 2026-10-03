@@ -1,0 +1,8 @@
+[module]
+path = "ecosystem::yaml"
+
+[native]
+go-module = "github.com/gomlang/yaml"
+
+[dev-dependencies]
+"ecosystem::config" = "0.1.0"

@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "package": "bindings",
+  "output": "bindings/generated.goml",
+  "go_package": "adapter",
+  "go_output": "adapter/generated.go",
+  "go_import_path": "github.com/gomlang/yaml/adapter",
+  "functions": [
+    {"name":"parse", "import_path":"github.com/gomlang/yaml/adapter", "symbol":"Parse"},
+    {"name":"emit", "import_path":"github.com/gomlang/yaml/adapter", "symbol":"Emit"}
+  ]
+}

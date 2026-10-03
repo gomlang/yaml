@@ -1,0 +1,9 @@
+package bindings;
+
+use std::ffi;
+
+#[go_ffi("github.com/gomlang/yaml/adapter", "GomlBind_emit")]
+pub extern fn emit(p0: ffi::String, p1: ffi::String, p2: isize, p3: isize) -> ffi::String;
+
+#[go_ffi("github.com/gomlang/yaml/adapter", "GomlBind_parse")]
+pub extern fn parse(p0: ffi::String, p1: ffi::String, p2: ffi::String) -> ffi::String;

@@ -1,0 +1,193 @@
+package yaml;
+
+use std::json;
+use std::num;
+use std::math;
+use std::serde::{Serialize, Deserialize};
+
+fn json_number(value: string, integer: bool) -> Result[json::Value, Error] {
+    if value.byte_len() > 4096 {
+        return Result::Err(error(ErrorKind::Limit, "YAML numeric scalar exceeds 4096 bytes"))
+    }
+    let json::Value::Number(parsed) = json::parse(value).map_err(
+        |message| error(ErrorKind::Serde, message),
+    )? else {
+        return Result::Err(error(ErrorKind::Serde, "invalid numeric scalar"))
+    };
+    if parsed != value
+        || (integer && (value.contains(".") || value.contains("e") || value.contains("E"))) {
+        return Result::Err(error(ErrorKind::Serde, "invalid numeric scalar"))
+    }
+    if !integer {
+        let number = num::parse_float64_structured(value).map_err(
+            |_| error(ErrorKind::Serde, "number exceeds float64 range"),
+        )?;
+        if !math::is_finite(number) {
+            return Result::Err(error(ErrorKind::Serde, "number exceeds finite float64 range"))
+        }
+    }
+    Result::Ok(json::Value::Number(value))
+}
+
+fn serde_error(problem: json::Error) -> Error {
+    let kind = match problem.kind() {
+        json::ErrorKind::Limit(_) => ErrorKind::Limit,
+        _ => ErrorKind::Serde,
+    };
+    error(kind, problem.to_string())
+}
+
+fn serde_encode_limits(limits: Limits) -> json::EncodeLimits {
+    json::EncodeLimits {
+        max_output_bytes: limits.max_decoded_bytes * 6 + limits.max_nodes * 64,
+        max_depth: limits.max_depth,
+        max_values: limits.max_nodes,
+        max_string_bytes: limits.max_decoded_bytes,
+        max_number_bytes: 4096,
+        max_container_entries: limits.max_nodes,
+        max_path_bytes: limits.max_decoded_bytes + limits.max_nodes * 32,
+        max_serde_frames: limits.max_depth * 4 + 16,
+        max_events: limits.max_nodes * 8 + 16,
+    }
+}
+
+fn serde_decode_limits(limits: Limits) -> json::DecodeLimits {
+    let bytes = limits.max_decoded_bytes * 6 + limits.max_nodes * 64;
+    json::DecodeLimits {
+        max_input_bytes: bytes,
+        max_value_bytes: bytes,
+        max_depth: limits.max_depth,
+        max_values: limits.max_nodes,
+        max_string_bytes: limits.max_decoded_bytes,
+        max_number_bytes: 4096,
+        max_container_entries: limits.max_nodes,
+        max_path_bytes: limits.max_decoded_bytes + limits.max_nodes * 32,
+        max_serde_frames: limits.max_depth * 4 + 16,
+        max_events: limits.max_nodes * 8 + 16,
+    }
+}
+
+fn value_to_json(value: Value, depth: isize, limit: isize) -> Result[json::Value, Error] {
+    if depth > limit {
+        return Result::Err(error(ErrorKind::Limit, "YAML value exceeds max_depth"))
+    }
+    match value {
+        Value::Null => Result::Ok(json::Value::Null),
+        Value::Bool(value) => Result::Ok(json::Value::Bool(value)),
+        Value::Integer(value) => json_number(value, true),
+        Value::Float(value) => if value == ".inf" || value == "-.inf" || value == ".nan" {
+            Result::Err(error(ErrorKind::Serde, "Serde YAML conversion requires finite numbers"))
+        } else {
+            json_number(value, false)
+        },
+        Value::String(value) => Result::Ok(json::Value::String(value)),
+        Value::Sequence(values) => {
+            let items = Vec::new();
+            for item in values {
+                items.push(value_to_json(item, depth + 1, limit)?);
+            }
+            Result::Ok(json::Value::Array(items))
+        },
+        Value::Mapping(entries) => {
+            let fields = Vec::new();
+            let names = HashMap::new();
+            for (key, item) in entries {
+                let Value::String(name) = key else {
+                    return Result::Err(
+                        error(
+                            ErrorKind::Serde,
+                            "Serde YAML conversion requires string mapping keys",
+                        ),
+                    )
+                };
+                if names.get(name).is_some() {
+                    return Result::Err(error(ErrorKind::DuplicateKey, "duplicate mapping key"))
+                }
+                names.set(name, true);
+                fields.push((name, value_to_json(item, depth + 1, limit)?));
+            }
+            Result::Ok(json::Value::Object(fields))
+        },
+    }
+}
+
+fn json_to_value(value: json::Value, depth: isize, limit: isize) -> Result[Value, Error] {
+    if depth > limit {
+        return Result::Err(error(ErrorKind::Limit, "YAML value exceeds max_depth"))
+    }
+    match value {
+        json::Value::Null => Result::Ok(Value::Null),
+        json::Value::Bool(value) => Result::Ok(Value::Bool(value)),
+        json::Value::String(value) => Result::Ok(Value::String(value)),
+        json::Value::Number(value) => if value.contains(".") || value.contains("e")
+            || value.contains("E") {
+            let _ = json_number(value, false)?;
+            Result::Ok(Value::Float(value))
+        } else {
+            let _ = json_number(value, true)?;
+            Result::Ok(Value::Integer(value))
+        },
+        json::Value::Array(items) => {
+            let values = Vec::new();
+            for item in items {
+                values.push(json_to_value(item, depth + 1, limit)?);
+            }
+            Result::Ok(Value::Sequence(values))
+        },
+        json::Value::Object(fields) => {
+            let entries = Vec::new();
+            let names = HashMap::new();
+            for (name, item) in fields {
+                if names.get(name).is_some() {
+                    return Result::Err(error(ErrorKind::DuplicateKey, "duplicate mapping key"))
+                }
+                names.set(name, true);
+                entries.push((Value::String(name), json_to_value(item, depth + 1, limit)?));
+            }
+            Result::Ok(Value::Mapping(entries))
+        },
+    }
+}
+
+pub fn to_json(value: Value) -> Result[json::Value, Error] {
+    let budget = Budget { limits: Limits::standard(), bytes: Ref::new(0), tokens: Vec::new() };
+    write_token(value, budget, 1)?;
+    value_to_json(value, 1, budget.limits.max_depth)
+}
+
+pub fn from_json(value: json::Value) -> Result[Value, Error] {
+    let limits = Limits::standard();
+    let _ = json::encode_with_limits(value, serde_encode_limits(limits)).map_err(serde_error)?;
+    let value = json_to_value(value, 1, limits.max_depth)?;
+    let budget = Budget { limits, bytes: Ref::new(0), tokens: Vec::new() };
+    write_token(value, budget, 1)?;
+    Result::Ok(value)
+}
+
+pub fn from_string_with_options[T: Deserialize](input: string, options: Options) -> Result[T, Error] {
+    let value = parse_with_options(input, options)?;
+    let json = value_to_json(value, 1, options.limits.max_depth)?;
+    let text = json::encode_with_limits(json, serde_encode_limits(options.limits)).map_err(
+        serde_error,
+    )?;
+    json::from_string_with_limits(text, serde_decode_limits(options.limits)).map_err(serde_error)
+}
+
+pub fn from_string[T: Deserialize](input: string) -> Result[T, Error] {
+    from_string_with_options(input, Options::standard())
+}
+
+pub fn to_string_with_options[T: Serialize](value: T, options: Options) -> Result[string, Error] {
+    validate(options)?;
+    let json = json::to_string_with_limits(value, serde_encode_limits(options.limits)).map_err(
+        serde_error,
+    )?;
+    let parsed = json::parse_with_limits(json, serde_decode_limits(options.limits)).map_err(
+        serde_error,
+    )?;
+    emit_with_options(json_to_value(parsed, 1, options.limits.max_depth)?, options)
+}
+
+pub fn to_string[T: Serialize](value: T) -> Result[string, Error] {
+    to_string_with_options(value, Options::standard())
+}

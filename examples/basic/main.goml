@@ -1,0 +1,24 @@
+package main;
+
+use ecosystem::yaml;
+use std::serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+struct Settings {
+    name: string,
+    port: u16,
+    routes: Vec[string],
+}
+
+fn main() -> () {
+    let settings: Result[Settings, yaml::Error] = yaml::from_string(
+        "name: service\nport: 8080\nroutes:\n  - /health\n  - /ready\n",
+    );
+    match settings {
+        Result::Ok(value) => match yaml::to_string(value) {
+            Result::Ok(text) => println(text),
+            Result::Err(problem) => println(problem.to_string()),
+        },
+        Result::Err(problem) => println(problem.to_string()),
+    }
+}
