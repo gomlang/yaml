@@ -1,0 +1,24 @@
+package tests;
+
+use ecosystem::yaml;
+use std::serde::{Serialize, Deserialize};
+use std::testing;
+
+#[derive(Serialize, Deserialize, PartialEq)]
+struct Package {
+    name: string,
+    versions: Vec[string],
+}
+
+#[test]
+fn registered_native_dependency_supports_independent_serde_types() -> () {
+    let record: Package = testing::expect_ok(
+        yaml::from_string("%YAML 1.2\n---\nname: service\nversions: ['1.0', '2.0']\n"),
+        "decode dependency",
+    );
+    testing::assert_eq(record.name, "service");
+    testing::assert_eq(record.versions.len(), 2);
+    let output = testing::expect_ok(yaml::to_string(record), "encode dependency");
+    let decoded: Package = testing::expect_ok(yaml::from_string(output), "decode dependency output");
+    testing::assert(decoded == record);
+}

@@ -1,0 +1,69 @@
+package tests;
+
+use ecosystem::yaml;
+use ecosystem::config;
+use std::json;
+use std::serde::{Deserialize};
+use std::testing;
+
+#[derive(Deserialize)]
+struct Settings {
+    host: string,
+    port: u16,
+    tags: Vec[string],
+}
+
+fn yaml_source(name: string, text: Ref[string]) -> config::Source {
+    config::Source::dynamic(
+        name,
+        config::Format::Json,
+        || {
+            let converted = yaml::parse(text.get()).and_then(yaml::to_json);
+            converted.map(json::encode).map_err(
+                |problem| config::Error::new(
+                    config::ErrorKind::Parse,
+                    "",
+                    config::Origin { source: name, detail: "YAML" },
+                    problem.to_string(),
+                ),
+            )
+        },
+    )
+}
+
+#[test]
+fn real_configuration_consumer_layers_yaml_and_retains_last_good_reload() -> () {
+    let text = Ref::new("host: service.example\nport: 8080\ntags: [production]\n");
+    let builder = config::Builder::new().with_source(
+        config::Source::json("defaults", "{\"host\":\"localhost\",\"port\":8000,\"tags\":[]}"),
+    ).with_source(yaml_source("service.yaml", text));
+    let live = testing::expect_ok(config::Live::new(builder), "YAML config source");
+    let settings: Settings = testing::expect_ok(live.snapshot().decode(), "typed config");
+    testing::assert_eq(settings.host, "service.example");
+    testing::assert_eq(settings.port, 8080.to_u16());
+    testing::assert_eq(settings.tags.len(), 1);
+    testing::assert_eq(
+        testing::expect_ok(live.snapshot().origin("/port"), "origin").source,
+        "service.yaml",
+    );
+    text.set("host: next.example\nport: 9090\ntags: []\n");
+    testing::assert_ok(live.reload());
+    let changed: Settings = testing::expect_ok(live.snapshot().decode(), "changed config");
+    testing::assert_eq(changed.port, 9090.to_u16());
+    text.set("host: one\nhost: two\n");
+    testing::assert(live.reload().is_err());
+    let retained: Settings = testing::expect_ok(live.snapshot().decode(), "last good config");
+    testing::assert_eq(retained.host, "next.example");
+}
+
+#[test]
+fn independent_consumer_handles_multiple_documents_and_nonspecific_tags() -> () {
+    let docs = testing::expect_ok(
+        yaml::parse_documents("%YAML 1.2\n---\n! 123\n---\n[one, two]\n"),
+        "document stream",
+    );
+    testing::assert_eq(docs.len(), 2);
+    testing::assert_eq(docs[0], yaml::Value::String("123"));
+    let encoded = testing::expect_ok(yaml::emit_documents(docs), "stream emitter");
+    testing::assert(testing::expect_ok(yaml::parse_documents(encoded), "stream reader") == docs);
+}

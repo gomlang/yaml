@@ -1,0 +1,229 @@
+package tests;
+
+use ecosystem::yaml;
+use std::json;
+use std::serde::{Serialize, Deserialize};
+use std::testing;
+
+fn parsed(input: string) -> yaml::Value {
+    testing::expect_ok(yaml::parse(input), "parse YAML")
+}
+
+fn field(value: yaml::Value, name: string) -> yaml::Value {
+    testing::expect_some(value.field(name), "mapping field")
+}
+
+#[test]
+fn nested_block_and_flow_collections_use_core_schema() -> () {
+    let value = parsed(
+        "name: service\nenabled: TRUE\nlegacy: yes\ncount: 012\nhex: 0xff\nitems:\n  - first\n  - {key: [1, 2, null]}\n",
+    );
+    testing::assert_eq(field(value, "name"), yaml::Value::String("service"));
+    testing::assert_eq(field(value, "enabled"), yaml::Value::Bool(true));
+    testing::assert_eq(field(value, "legacy"), yaml::Value::String("yes"));
+    testing::assert_eq(field(value, "count"), yaml::Value::Integer("12"));
+    testing::assert_eq(field(value, "hex"), yaml::Value::Integer("255"));
+    let items = testing::expect_some(field(value, "items").as_sequence(), "sequence");
+    testing::assert_eq(items.len(), 2);
+    testing::assert_eq(parsed("18446744073709551616"), yaml::Value::Integer("18446744073709551616"));
+}
+
+#[test]
+fn quoted_plain_literal_folded_and_escaped_scalars() -> () {
+    let value = parsed(
+        "single: 'it''s yaml'\ndouble: \"a\\/b\\n\\u4e2d\"\nliteral: |-\n  one\n  two\nfolded: >-\n  one\n  two\nplain: 2026-10-03\n",
+    );
+    testing::assert_eq(field(value, "single"), yaml::Value::String("it's yaml"));
+    testing::assert_eq(field(value, "double"), yaml::Value::String("a/b\n中"));
+    testing::assert_eq(field(value, "literal"), yaml::Value::String("one\ntwo"));
+    testing::assert_eq(field(value, "folded"), yaml::Value::String("one two"));
+    testing::assert_eq(field(value, "plain"), yaml::Value::String("2026-10-03"));
+    testing::assert_eq(parsed("!!str 1e999"), yaml::Value::String("1e999"));
+    testing::assert_eq(parsed("! true"), yaml::Value::String("true"));
+    testing::assert_eq(
+        parsed(
+            string_from_utf8(Vec::from_array([239.to_u8(), 187.to_u8(), 191.to_u8()])).1 + "! 123",
+        ),
+        yaml::Value::String("123"),
+    );
+}
+
+#[test]
+fn aliases_documents_and_version_directives() -> () {
+    let value = parsed("first: &settings {port: 8080}\nsecond: *settings\n");
+    testing::assert_eq(field(value, "first"), field(value, "second"));
+    let documents = testing::expect_ok(
+        yaml::parse_documents("%YAML 1.2\n---\none\n...\n%YAML 1.2\n---\ntwo\n"),
+        "documents",
+    );
+    testing::assert_eq(documents.len(), 2);
+    testing::assert_eq(documents[1], yaml::Value::String("two"));
+    testing::assert(yaml::parse("---\none\n---\ntwo").is_err());
+    testing::assert_eq(parsed("# no document\n"), yaml::Value::Null);
+    testing::assert(testing::expect_ok(yaml::parse_documents(""), "empty stream").is_empty());
+}
+
+#[test]
+fn duplicate_keys_are_explicit_and_report_source_position() -> () {
+    let problem = testing::expect_err(yaml::parse("name: first\nname: second\n"), "duplicate");
+    testing::assert_eq(problem.kind, yaml::ErrorKind::DuplicateKey);
+    testing::assert_eq(problem.line, 2);
+    testing::assert_eq(problem.column, 1);
+    for (policy, expected) in Vec::from_array(
+        [(yaml::DuplicateKeys::FirstWins, "first"), (yaml::DuplicateKeys::LastWins, "second")],
+    ) {
+        let value = testing::expect_ok(
+            yaml::parse_with_options(
+                "name: first\nname: second",
+                yaml::Options { duplicate_keys: policy, ..yaml::Options::standard() },
+            ),
+            "duplicate policy",
+        );
+        testing::assert_eq(field(value, "name"), yaml::Value::String(expected));
+    }
+    testing::assert(yaml::parse("01: one\n+1: two").is_err());
+    testing::assert(yaml::parse("-0.0: one\n0.0: two").is_err());
+}
+
+#[test]
+fn unsupported_constructs_and_alias_cycles_fail_recoverably() -> () {
+    for input in Vec::from_array(["!application value", "<<: {name: base}", "? [a, b]\n: value"]) {
+        testing::assert_eq(
+            testing::expect_err(yaml::parse(input), "unsupported").kind,
+            yaml::ErrorKind::Unsupported,
+        );
+    }
+    for input in Vec::from_array(["a: &a [*a]", "---\na: &anchor 1\n---\nb: *anchor"]) {
+        testing::assert_eq(
+            testing::expect_err(yaml::parse(input), "alias").kind,
+            yaml::ErrorKind::Alias,
+        );
+    }
+    testing::assert(yaml::parse("[missing").is_err());
+    testing::assert(yaml::parse("!!bool yes").is_err());
+    testing::assert(yaml::parse("!!int 1_000").is_err());
+}
+
+#[test]
+fn input_depth_nodes_aliases_and_output_are_bounded() -> () {
+    let standard = yaml::Limits::standard();
+    for (input, limits) in Vec::from_array(
+        [
+            ("abcd", yaml::Limits { max_input_bytes: 3, ..standard }),
+            ("[[x]]", yaml::Limits { max_depth: 2, ..standard }),
+            ("[1, 2, 3]", yaml::Limits { max_nodes: 3, ..standard }),
+            ("[&a value, *a]", yaml::Limits { max_alias_expansions: 0, ..standard }),
+            ("[&a word, *a]", yaml::Limits { max_decoded_bytes: 7, ..standard }),
+            ("---\none\n---\ntwo", yaml::Limits { max_documents: 1, ..standard }),
+        ],
+    ) {
+        let problem = testing::expect_err(
+            yaml::parse_documents_with_options(
+                input,
+                yaml::Options { limits, ..yaml::Options::standard() },
+            ),
+            "bounded parse",
+        );
+        testing::assert_eq(problem.kind, yaml::ErrorKind::Limit);
+    }
+    testing::assert_eq(
+        testing::expect_err(
+            yaml::emit_with_options(
+                yaml::Value::String("hello"),
+                yaml::Options {
+                    limits: yaml::Limits { max_output_bytes: 2, ..standard },
+                    ..yaml::Options::standard(),
+                },
+            ),
+            "bounded emit",
+        ).kind,
+        yaml::ErrorKind::Limit,
+    );
+}
+
+#[test]
+fn dynamic_values_preserve_types_and_emission_is_unambiguous() -> () {
+    let value = parsed(
+        "boolean: true\nstring: 'true'\ninteger: 9007199254740993\nfloat: 1.0\nnull: null\n",
+    );
+    let output = testing::expect_ok(yaml::emit(value), "emit");
+    testing::assert_eq(parsed(output), value);
+    let values = Vec::from_array([yaml::Value::String("yes"), yaml::Value::Sequence(Vec::new())]);
+    let output = testing::expect_ok(yaml::emit_documents(values), "emit stream");
+    testing::assert(testing::expect_ok(yaml::parse_documents(output), "stream") == values);
+    testing::assert(yaml::emit(yaml::Value::Integer("invalid")).is_err());
+    testing::assert(
+        yaml::emit(
+            yaml::Value::Mapping(
+                Vec::from_array([(yaml::Value::Sequence(Vec::new()), yaml::Value::Null)]),
+            ),
+        ).is_err(),
+    );
+}
+
+#[derive(Serialize, Deserialize, PartialEq)]
+struct Service {
+    name: string,
+    port: u16,
+    paths: Vec[string],
+    optional: Option[string],
+}
+
+#[derive(Serialize, Deserialize, PartialEq)]
+enum Mode {
+    Local,
+    Remote(string),
+}
+
+#[test]
+fn serde_derives_options_vectors_and_enums_compose() -> () {
+    let input = "name: worker\nport: 8080\npaths: [/health, /ready]\noptional: null\n";
+    let service: Service = testing::expect_ok(yaml::from_string(input), "typed YAML");
+    testing::assert_eq(service.port, 8080.to_u16());
+    testing::assert_eq(service.name, "worker");
+    let encoded = testing::expect_ok(yaml::to_string(service), "typed encode");
+    let restored: Service = testing::expect_ok(yaml::from_string(encoded), "typed decode");
+    testing::assert(restored == service);
+    let value = Mode::Remote("host");
+    let decoded: Mode = testing::expect_ok(
+        yaml::from_string(testing::expect_ok(yaml::to_string(value), "enum encode")),
+        "enum decode",
+    );
+    testing::assert(decoded == value);
+    let invalid: Result[Service, yaml::Error] = yaml::from_string(
+        "name: service\nport: 100000\npaths: []\noptional: null",
+    );
+    testing::assert(invalid.is_err());
+}
+
+#[test]
+fn json_bridge_rejects_invalid_numbers_and_unsupported_values() -> () {
+    testing::assert(yaml::to_json(yaml::Value::Integer("NaN")).is_err());
+    testing::assert(yaml::to_json(yaml::Value::Float("1e999")).is_err());
+    testing::assert(yaml::to_json(yaml::Value::Float(".nan")).is_err());
+    testing::assert(yaml::from_json(json::Value::Number("invalid")).is_err());
+    testing::assert(yaml::to_json(parsed("1: value")).is_err());
+    let value = parsed("name: tool\nitems: [1, true, null]");
+    testing::assert_eq(
+        testing::expect_ok(
+            yaml::from_json(testing::expect_ok(yaml::to_json(value), "to JSON")),
+            "from JSON",
+        ),
+        value,
+    );
+}
+
+#[test]
+fn cyclic_constructed_values_stop_at_depth_limit() -> () {
+    let items = Vec::new();
+    let value = yaml::Value::Sequence(items);
+    items.push(value);
+    testing::assert_eq(
+        testing::expect_err(yaml::emit(value), "cyclic emit").kind,
+        yaml::ErrorKind::Limit,
+    );
+    testing::assert_eq(
+        testing::expect_err(yaml::to_json(value), "cyclic bridge").kind,
+        yaml::ErrorKind::Limit,
+    );
+}

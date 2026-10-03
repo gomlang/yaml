@@ -1,0 +1,5 @@
+[module]
+path = "downstream::yaml"
+
+[dependencies]
+"ecosystem::yaml" = "0.1.0"

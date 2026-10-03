@@ -1,0 +1,10 @@
+package main;
+
+use ecosystem::yaml;
+
+fn main() -> () {
+    match yaml::parse("%YAML 1.2\n---\nname: consumer\n") {
+        Result::Ok(value) => println(value.debug()),
+        Result::Err(problem) => println(problem.to_string()),
+    }
+}
