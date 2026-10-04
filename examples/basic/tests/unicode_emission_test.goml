@@ -1,0 +1,12 @@
+package tests;
+
+use ecosystem::yaml;
+use std::testing;
+
+#[test]
+fn typed_multiline_unicode_strings_survive_yaml_emission() -> () {
+    let value = "first\nsecond\u2028third\u2029last";
+    let wire = testing::expect_ok(yaml::to_string(value), "serialize");
+    let decoded: string = testing::expect_ok(yaml::from_string(wire), "deserialize");
+    testing::assert_eq(decoded, value);
+}

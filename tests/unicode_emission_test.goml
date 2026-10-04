@@ -1,0 +1,21 @@
+package tests;
+
+use ecosystem::yaml;
+use std::testing;
+
+#[test]
+fn multiline_strings_with_unicode_line_separators_round_trip() -> () {
+    for separator in Vec::from_array(["\u0085", "\u2028", "\u2029"]) {
+        for text in Vec::from_array(
+            ["a" + separator + "b", "a\nb" + separator + "c", separator + "\n", "\n" + separator],
+        ) {
+            let value = yaml::Value::String(text);
+            let wire = testing::expect_ok(yaml::emit(value), "emit Unicode string");
+            testing::assert(!wire.contains(separator));
+            testing::assert_eq(
+                testing::expect_ok(yaml::parse(wire), "parse emitted Unicode string"),
+                value,
+            );
+        }
+    }
+}

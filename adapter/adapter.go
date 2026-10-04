@@ -597,7 +597,7 @@ func makeNode(tokens []Token, index *int, depth int, limits Limits) (*yaml.Node,
 			return nil, fail("argument", "YAML strings must be UTF-8", nil)
 		}
 		node.Kind, node.Tag, node.Style = yaml.ScalarNode, "!!str", yaml.DoubleQuotedStyle
-		if strings.Contains(token.Text, "\n") {
+		if strings.Contains(token.Text, "\n") && !strings.ContainsAny(token.Text, "\u0085\u2028\u2029") {
 			node.Style = yaml.LiteralStyle
 		}
 	case "sequence", "mapping":
