@@ -59,7 +59,7 @@ the floating-point sign of `-0`, including quoted scalars. Hexadecimal and octal
 spellings are integer syntax; they are not accepted as explicit
 floats or manually constructed `Value::Float` values during emission.
 
-Unknown/custom tags, `!!binary`, timestamps as typed tags, YAML 1.1 merge keys (`<<`), complex mapping keys, recursive aliases, and references to anchors in other documents fail explicitly. A quoted `"<<"` remains an ordinary key. Alias expansion produces values and does not preserve graph sharing or anchor names. Comments, quoting style, tags, and exact number spelling are not round-tripped.
+Unknown/custom tags, `!!binary`, timestamps as typed tags, YAML 1.1 merge keys (`<<`), complex mapping keys, recursive aliases, and references to anchors in other documents fail explicitly. Quoted `"<<"`, `!!str <<`, and `! <<` remain ordinary string keys and use the usual duplicate-key policy. Alias expansion produces values and does not preserve graph sharing or anchor names. Comments, quoting style, tags, and exact number spelling are not round-tripped.
 
 The backend has legacy syntax behavior in parts of the YAML grammar. Literal NEL (`U+0085`), LS (`U+2028`), and PS (`U+2029`) characters in source are therefore rejected rather than silently treated as line breaks; use double-quoted Unicode escapes for those string values. Emission always escapes these characters, including in strings that also contain ordinary newlines, so its output remains readable by the parser. UTF-8 input, LF/CRLF/CR line endings, and a UTF-8 stream BOM are supported. Remaining backend grammar differences may still produce syntax errors for otherwise valid YAML; the checked-in reference subset and regression tests document exercised behavior.
 

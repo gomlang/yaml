@@ -396,7 +396,7 @@ func (r *resolver) resolve(node *yaml.Node, depth int) (*nodeValue, error) {
 		seen := map[string]int{}
 		for index := 0; index < len(node.Content); index += 2 {
 			keyNode := node.Content[index]
-			if keyNode.Tag == "!!merge" {
+			if keyNode.Tag == "!!merge" && !(r.source != nil && r.source.nonSpecificTag(keyNode)) {
 				return nil, fail("unsupported", "YAML merge keys are not supported", keyNode)
 			}
 			key, err := r.resolve(keyNode, depth+1)

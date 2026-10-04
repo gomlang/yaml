@@ -1,0 +1,13 @@
+package tests;
+
+use ecosystem::yaml;
+use std::testing;
+
+#[test]
+fn consumer_can_use_non_specific_tags_on_string_mapping_keys() -> () {
+    let value = testing::expect_ok(yaml::parse("! <<: value"), "parse string key");
+    testing::assert_eq(
+        testing::expect_some(value.field("<<"), "lookup key"),
+        yaml::Value::String("value"),
+    );
+}

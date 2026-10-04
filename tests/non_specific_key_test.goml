@@ -1,0 +1,28 @@
+package tests;
+
+use ecosystem::yaml;
+use std::testing;
+
+#[test]
+fn non_specific_tag_forces_merge_spelling_to_be_an_ordinary_mapping_key() -> () {
+    for source in Vec::from_array(
+        ["! <<: value", "{! <<: value}", "&key ! <<: value", "! &key <<: value", "? ! <<\n: value"],
+    ) {
+        let value = testing::expect_ok(yaml::parse(source), "string key");
+        testing::assert_eq(
+            testing::expect_some(value.field("<<"), "ordinary key"),
+            yaml::Value::String("value"),
+        );
+        testing::assert_eq(
+            testing::expect_ok(
+                yaml::parse(testing::expect_ok(yaml::emit(value), "emit")),
+                "reparse",
+            ),
+            value,
+        );
+    }
+    testing::assert_eq(
+        testing::expect_err(yaml::parse("'<<': first\n! <<: second"), "duplicate strings").kind,
+        yaml::ErrorKind::DuplicateKey,
+    );
+}
