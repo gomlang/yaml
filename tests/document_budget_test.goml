@@ -1,0 +1,53 @@
+package tests;
+
+use ecosystem::yaml;
+use std::testing;
+
+#[test]
+fn emission_scalar_budgets_include_normalization_across_all_documents() -> () {
+    for (values, needed) in Vec::from_array(
+        [
+            (Vec::from_array([yaml::Value::Float("1"), yaml::Value::Float("2")]), 6),
+            (Vec::from_array([yaml::Value::Null, yaml::Value::Null]), 8),
+            (
+                Vec::from_array(
+                    [
+                        yaml::Value::Sequence(
+                            Vec::from_array(
+                                [yaml::Value::Integer("000000"), yaml::Value::Float("1")],
+                            ),
+                        ),
+                    ],
+                ),
+                9,
+            ),
+        ],
+    ) {
+        let options = yaml::Options {
+            limits: yaml::Limits { max_decoded_bytes: needed - 1, ..yaml::Limits::standard() },
+            ..yaml::Options::standard(),
+        };
+        testing::assert_eq(
+            testing::expect_err(
+                yaml::emit_documents_with_options(values, options),
+                "normalized scalar budget",
+            ).kind,
+            yaml::ErrorKind::Limit,
+        );
+        let exact = yaml::Options {
+            limits: yaml::Limits { max_decoded_bytes: needed, ..options.limits },
+            ..options,
+        };
+        let wire = testing::expect_ok(
+            yaml::emit_documents_with_options(values, exact),
+            "exact scalar budget",
+        );
+        testing::assert_eq(
+            testing::expect_ok(
+                yaml::parse_documents_with_options(wire, exact),
+                "read emitted stream",
+            ).len(),
+            values.len(),
+        );
+    }
+}

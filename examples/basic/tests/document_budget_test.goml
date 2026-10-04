@@ -1,0 +1,22 @@
+package tests;
+
+use ecosystem::yaml;
+use std::testing;
+
+#[test]
+fn consumer_emission_limits_cover_every_normalized_document() -> () {
+    let options = yaml::Options {
+        limits: yaml::Limits { max_decoded_bytes: 5, ..yaml::Limits::standard() },
+        ..yaml::Options::standard(),
+    };
+    testing::assert_eq(
+        testing::expect_err(
+            yaml::emit_documents_with_options(
+                Vec::from_array([yaml::Value::Float("1"), yaml::Value::Float("2")]),
+                options,
+            ),
+            "stream scalar budget",
+        ).kind,
+        yaml::ErrorKind::Limit,
+    );
+}

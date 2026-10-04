@@ -563,7 +563,7 @@ func (w *boundedWriter) Write(data []byte) (int, error) {
 	return w.buffer.Write(data)
 }
 
-func makeNode(tokens []Token, index *int, depth int, limits Limits) (*yaml.Node, error) {
+func makeNode(tokens []Token, index *int, depth int, limits Limits, decoded *int) (*yaml.Node, error) {
 	if depth > limits.Depth {
 		return nil, fail("limit", "YAML nesting exceeds max_depth", nil)
 	}
@@ -610,7 +610,7 @@ func makeNode(tokens []Token, index *int, depth int, limits Limits) (*yaml.Node,
 			node.Kind, node.Tag, count = yaml.MappingNode, "!!map", count*2
 		}
 		for child := 0; child < count; child++ {
-			value, err := makeNode(tokens, index, depth+1, limits)
+			value, err := makeNode(tokens, index, depth+1, limits, decoded)
 			if err != nil {
 				return nil, err
 			}
@@ -618,6 +618,14 @@ func makeNode(tokens []Token, index *int, depth int, limits Limits) (*yaml.Node,
 		}
 	default:
 		return nil, fail("bridge", "invalid YAML token kind", nil)
+	}
+	// Raw token bytes were charged across the stream before construction. Keep
+	// each scalar's larger spelling even when another scalar normalizes shorter.
+	if extra := len(node.Value) - len(token.Text); extra > 0 {
+		if extra > limits.Decoded-*decoded {
+			return nil, fail("limit", "YAML scalar bytes exceed max_decoded_bytes", nil)
+		}
+		*decoded += extra
 	}
 	return node, nil
 }
@@ -659,7 +667,7 @@ func Emit(rawTokens, rawLimits string, documents, indent int) string {
 	encoder.SetIndent(indent)
 	index := 0
 	for document := 0; document < documents; document++ {
-		node, err := makeNode(tokens, &index, 1, limits)
+		node, err := makeNode(tokens, &index, 1, limits, &total)
 		if err != nil {
 			return response(result, err)
 		}
