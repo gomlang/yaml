@@ -1,0 +1,16 @@
+package tests;
+
+use ecosystem::yaml;
+use std::testing;
+
+#[test]
+fn consumer_can_decode_slash_escapes_after_verbatim_core_tags() -> () {
+    let value = testing::expect_ok(
+        yaml::parse("path: !<tag:yaml.org,2002:str> \"a\\/b\""),
+        "tagged path",
+    );
+    testing::assert_eq(
+        testing::expect_some(value.field("path"), "path field"),
+        yaml::Value::String("a/b"),
+    );
+}

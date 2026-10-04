@@ -1,0 +1,67 @@
+package tests;
+
+use ecosystem::yaml;
+use std::testing;
+
+#[test]
+fn escaped_slashes_accept_verbatim_core_tags_and_anchors() -> () {
+    for source in Vec::from_array(
+        [
+            "!<tag:yaml.org,2002:str> \"a\\/b\"",
+            "&anchor !<tag:yaml.org,2002:str> \"a\\/b\"",
+            "!<tag:yaml.org,2002:str> &anchor \"a\\/b\"",
+            "%YAML 1.2\n---\n!<tag:yaml.org,2002:str> # comment\n  \"a\\/b\"",
+        ],
+    ) {
+        testing::assert_eq(
+            testing::expect_ok(yaml::parse(source), "verbatim string tag"),
+            yaml::Value::String("a/b"),
+        );
+    }
+    let value = testing::expect_ok(
+        yaml::parse("[&a !<tag:yaml.org,2002:str> \"a\\/b\", *a]"),
+        "tagged anchor",
+    );
+    testing::assert_eq(
+        value,
+        yaml::Value::Sequence(
+            Vec::from_array([yaml::Value::String("a/b"), yaml::Value::String("a/b")]),
+        ),
+    );
+}
+
+#[test]
+fn verbatim_slash_normalization_retains_limits_and_tag_validation() -> () {
+    let source = "!<tag:yaml.org,2002:str> \"a\\/b\"";
+    let exact = yaml::Options {
+        limits: yaml::Limits {
+            max_input_bytes: source.byte_len(),
+            max_decoded_bytes: 3,
+            ..yaml::Limits::standard(),
+        },
+        ..yaml::Options::standard(),
+    };
+    testing::assert_eq(
+        testing::expect_ok(yaml::parse_with_options(source, exact), "exact budgets"),
+        yaml::Value::String("a/b"),
+    );
+    let small = yaml::Options {
+        limits: yaml::Limits { max_decoded_bytes: 2, ..yaml::Limits::standard() },
+        ..yaml::Options::standard(),
+    };
+    testing::assert_eq(
+        testing::expect_err(yaml::parse_with_options(source, small), "decoded budget").kind,
+        yaml::ErrorKind::Limit,
+    );
+    testing::assert_eq(
+        testing::expect_err(
+            yaml::parse("!<tag:example.test,2026:custom> \"a\\/b\""),
+            "unsupported tag",
+        ).kind,
+        yaml::ErrorKind::Unsupported,
+    );
+    testing::assert_eq(
+        testing::expect_err(yaml::parse("!<tag:yaml.org,2002:int> \"a\\/b\""), "invalid integer").kind,
+        yaml::ErrorKind::Syntax,
+    );
+}

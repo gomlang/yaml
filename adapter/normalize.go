@@ -75,6 +75,14 @@ func quotedStart(input string, position int) int {
 			}
 			continue
 		case '&', '!':
+			if strings.HasPrefix(input[position:], "!<") {
+				end := strings.IndexByte(input[position+2:], '>')
+				if end < 0 {
+					return -1
+				}
+				position += end + 3
+				continue
+			}
 			for position < len(input) && !strings.ContainsRune(" \t\r\n,[]{}", rune(input[position])) {
 				position++
 			}

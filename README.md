@@ -65,6 +65,11 @@ The backend has legacy syntax behavior in parts of the YAML grammar. Literal NEL
 
 Two compatibility adaptations are bounded and syntax-aware. `%YAML 1.2` is normalized to a same-width backend directive only after the backend identifies an incompatible version at that exact source line. Double-quoted `\/` is normalized to an equivalent supported escape only after a backend error and a node-based probe confirms which escapes are active. Quoted directive text, plain/single-quoted/block scalar contents, and escaped backslashes are preserved. Source-column mappings account for inserted escape characters.
 
+Slash escapes also work after complete verbatim core tags such as
+`!<tag:yaml.org,2002:str>`, including with anchors and intervening comments.
+Commas inside these tag URIs do not end the tag; the surrounding scalar keeps
+the same validation and decoded-byte limits.
+
 ## Bounds and diagnostics
 
 `Options::standard()` sets indentation to two spaces and rejects duplicate keys. Indentation accepts 1–8 spaces. `Limits::standard()` supplies:
