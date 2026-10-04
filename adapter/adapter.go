@@ -181,7 +181,10 @@ func coreScalar(node *yaml.Node) (Token, error) {
 			}
 		case "!!float", "tag:yaml.org,2002:float":
 			if kind == "integer" {
-				number, err := strconv.ParseFloat(text, 64)
+				if !decimalInteger.MatchString(value) {
+					return token, fail("syntax", "invalid explicit float scalar", node)
+				}
+				number, err := strconv.ParseFloat(value, 64)
 				if err != nil {
 					return token, fail("unsupported", "YAML float exceeds finite float64 range", node)
 				}

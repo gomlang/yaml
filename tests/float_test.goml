@@ -1,0 +1,34 @@
+package tests;
+
+use ecosystem::yaml;
+use std::testing;
+
+#[test]
+fn explicit_float_negative_zero_survives_dynamic_and_typed_decoding() -> () {
+    let negative_zero_bits: u64 = 9223372036854775808;
+    for source in Vec::from_array(["!!float -0", "!!float '-00'", "!!float \"-000\""]) {
+        testing::assert_eq(
+            testing::expect_ok(yaml::parse(source), "explicit float"),
+            yaml::Value::Float("-0.0"),
+        );
+        let decoded: f64 = testing::expect_ok(yaml::from_string(source), "typed float");
+        testing::assert_eq(decoded.to_bits(), negative_zero_bits);
+    }
+    let encoded = testing::expect_ok(yaml::emit(yaml::Value::Float("-0")), "emit negative zero");
+    testing::assert_eq(
+        testing::expect_ok(yaml::parse(encoded), "emitted negative zero"),
+        yaml::Value::Float("-0.0"),
+    );
+}
+
+#[test]
+fn explicit_floats_reject_hexadecimal_and_octal_integer_spelling() -> () {
+    for value in Vec::from_array(["0xFF", "0o17", "0x0", "0o0"]) {
+        testing::assert_eq(
+            testing::expect_err(yaml::parse("!!float " + value), "nondecimal float").kind,
+            yaml::ErrorKind::Syntax,
+        );
+        testing::assert_err(yaml::emit(yaml::Value::Float(value)));
+        testing::assert_ok(yaml::parse("!!int " + value));
+    }
+}

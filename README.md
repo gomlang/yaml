@@ -54,6 +54,11 @@ Serde uses the standard JSON data conventions: struct fields are string mapping 
 
 Plain `true`/`false`, null spellings, decimal integers, `0o` octal and `0x` hexadecimal values follow the YAML 1.2 core schema. `yes`, `no`, `on`, `off`, dates, `0b` binary integers, and underscored numbers remain strings. Decimal integers with leading zeroes are decimal, not YAML 1.1 octal. Explicit `!!str` and the non-specific `!` scalar tag force strings. `!!null`, `!!bool`, `!!int`, and `!!float` validate their contents. Explicit `!!seq`/`!!map` collection tags are supported. Both accepted version-directive spellings (`1.1` and `1.2`) use this library's core 1.2 scalar schema.
 
+Explicit `!!float` accepts decimal integer spellings such as `012` and preserves
+the floating-point sign of `-0`, including quoted scalars. Hexadecimal and octal
+spellings are integer syntax; they are not accepted as explicit
+floats or manually constructed `Value::Float` values during emission.
+
 Unknown/custom tags, `!!binary`, timestamps as typed tags, YAML 1.1 merge keys (`<<`), complex mapping keys, recursive aliases, and references to anchors in other documents fail explicitly. A quoted `"<<"` remains an ordinary key. Alias expansion produces values and does not preserve graph sharing or anchor names. Comments, quoting style, tags, and exact number spelling are not round-tripped.
 
 The backend has legacy syntax behavior in parts of the YAML grammar. Literal NEL (`U+0085`), LS (`U+2028`), and PS (`U+2029`) characters in source are therefore rejected rather than silently treated as line breaks; use double-quoted Unicode escapes for those string values. UTF-8 input, LF/CRLF/CR line endings, and a UTF-8 stream BOM are supported. Remaining backend grammar differences may still produce syntax errors for otherwise valid YAML; the checked-in reference subset and regression tests document exercised behavior.

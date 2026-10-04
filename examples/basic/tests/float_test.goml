@@ -1,0 +1,12 @@
+package tests;
+
+use ecosystem::yaml;
+use std::testing;
+
+#[test]
+fn consumer_decodes_explicit_float_negative_zero_without_integer_coercion() -> () {
+    let negative_zero_bits: u64 = 9223372036854775808;
+    let value: f64 = testing::expect_ok(yaml::from_string("!!float -0"), "negative zero");
+    testing::assert_eq(value.to_bits(), negative_zero_bits);
+    testing::assert_err(yaml::parse("!!float 0xFF"));
+}
