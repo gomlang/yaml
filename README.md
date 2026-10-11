@@ -1,12 +1,12 @@
 # yaml
 
-Bounded YAML parsing, emission, and Serde conversion for GoML 0.1.57 or newer. The public API is GoML; syntax parsing and emission use the YAML organization's [`go.yaml.in/yaml/v3`](https://github.com/yaml/go-yaml) v3.0.5 through generated `goml bind-go` bindings. Go 1.26 or newer is required. There are no C dependencies.
+Bounded YAML parsing, emission, and Serde conversion for GoML. Requires a current GoML toolchain supporting unversioned registry dependencies; see [the pinned ecosystem toolchain](https://github.com/gomlang/verification/blob/main/ci/toolchain.json). The public API is GoML; syntax parsing and emission use the YAML organization's [`go.yaml.in/yaml/v3`](https://github.com/yaml/go-yaml) v3.0.5 through generated `goml bind-go` bindings. Go 1.26 or newer is required. There are no C dependencies.
 
 The library implements an application-oriented subset of the [YAML 1.2.2 core schema](https://yaml.org/spec/1.2.2/#103-core-schema). It supports block and flow mappings/sequences, plain/single/double-quoted scalars, quoted escapes including `\/`, literal/folded block scalars with chomping and indentation indicators, comments, anchors and bounded alias expansion, explicit core tags, `%YAML 1.2` directives, and multiple documents. It does not claim complete YAML conformance or preserve presentation details.
 
 ```toml
 [dependencies]
-"ecosystem::yaml" = "0.1.0"
+"ecosystem::yaml" = true
 ```
 
 ```goml
@@ -92,7 +92,17 @@ Errors expose `kind`, `message`, and one-based `line`/`column`. An unavailable c
 
 ## Validation
 
+From the library root, prepare native dependencies and run the full isolated-registry checks:
+
 ```sh
+python3 ../verification/ci/ecosystem.py native --libraries .. --module yaml
+(cd ../verification && just ecosystem-test yaml)
+```
+
+For individual checks with the ecosystem registry configured:
+
+```sh
+go mod download
 goml fmt --check
 goml check
 goml test
