@@ -1,6 +1,6 @@
 # yaml
 
-Bounded YAML parsing, emission, and Serde conversion for GoML. Requires a current GoML toolchain supporting unversioned registry dependencies; see [the pinned ecosystem toolchain](https://github.com/gomlang/workflows/blob/main/ci/toolchain.json). The public API is GoML; syntax parsing and emission use the YAML organization's [`go.yaml.in/yaml/v3`](https://github.com/yaml/go-yaml) v3.0.5 through generated `goml bind-go` bindings. Go 1.26 or newer is required. There are no C dependencies.
+Bounded YAML parsing, emission, and Serde conversion for GoML. Requires a current GoML toolchain supporting unversioned registry dependencies; see [the pinned ecosystem toolchain](https://github.com/gomlang/workflows/blob/main/ci/toolchain.json). The public API is GoML; syntax parsing and emission use the YAML organization's [`go.yaml.in/yaml/v3`](https://github.com/yaml/go-yaml) v3.0.5 through explicit Go FFI declarations. Go 1.26 or newer is required. There are no C dependencies.
 
 The library implements an application-oriented subset of the [YAML 1.2.2 core schema](https://yaml.org/spec/1.2.2/#103-core-schema). It supports block and flow mappings/sequences, plain/single/double-quoted scalars, quoted escapes including `\/`, literal/folded block scalars with chomping and indentation indicators, comments, anchors and bounded alias expansion, explicit core tags, `%YAML 1.2` directives, and multiple documents. It does not claim complete YAML conformance or preserve presentation details.
 
@@ -113,4 +113,4 @@ go test -race ./adapter
 
 Use an isolated ecosystem registry containing `ecosystem::config` for consumer tests. The ecosystem verification runner provisions it. Native tests compare all 36 pinned official YAML test-suite fixtures against their independent JSON results; see [fixture provenance and license](tests/data/reference/README.md). Additional tests cover core-schema differences, explicit/non-specific tags, alias bombs and cycles, every configurable budget, duplicate-key policy, source positions, Unicode/BOM/line endings, normalization, invalid dynamic values, bounded emission, and typed configuration integration.
 
-Regenerate the private bridge with `goml bind-go bindings.json`. `bindings/generated.goml`, `adapter/generated.go`, and `bindings.json.goml-bind.json` are generated together and should not be edited manually.
+The explicit declarations in `bindings/bindings.goml` call `adapter/` directly. Keep their signatures aligned with the Go functions; GoML trusts these declarations and the final Go build validates native compatibility.
