@@ -1,0 +1,286 @@
+package yaml;
+
+use std::text;
+
+struct Output {
+    pieces: text::StringBuilder,
+    bytes: Ref[isize],
+    options: Options,
+}
+
+fn output(writer: Output, value: string) -> Result[(), Error] {
+    if value.byte_len() > writer.options.limits.max_output_bytes - writer.bytes.get() {
+        return Result::Err(error(ErrorKind::Limit, "YAML output exceeds max_output_bytes"))
+    }
+    writer.bytes.set(writer.bytes.get() + value.byte_len());
+    writer.pieces.write_string(value);
+    Result::Ok(())
+}
+
+fn normalize_value(value: Value, budget: Budget, depth: isize) -> Result[Value, Error] {
+    if depth > budget.limits.max_depth || budget.nodes.get() >= budget.limits.max_nodes {
+        return Result::Err(error(ErrorKind::Limit, "YAML value exceeds depth or node limit"))
+    }
+    budget.nodes.set(budget.nodes.get() + 1);
+    let normalized = match value {
+        Value::Integer(raw) => core_scalar(raw, "!!int", false)?,
+        Value::Float(raw) => core_scalar(raw, "!!float", false)?,
+        Value::String(raw) => {
+            let mut offset = 0;
+            while offset < raw.byte_len() {
+                let Some((_, width)) = raw.decode_at(offset) else {
+                    return Result::Err(error(ErrorKind::Argument, "YAML strings must be UTF-8"))
+                };
+                offset += width;
+            }
+            value
+        },
+        Value::Sequence(items) => {
+            let values = Vec::new();
+            for item in items {
+                values.push(normalize_value(item, budget, depth + 1)?);
+            }
+            Value::Sequence(values)
+        },
+        Value::Mapping(entries) => {
+            let values = Vec::new();
+            let seen = HashMap::new();
+            for (key, item) in entries {
+                let key = normalize_value(key, budget, depth + 1)?;
+                let identity = key_identity(key)?;
+                if seen.get(identity).is_some() {
+                    return Result::Err(error(ErrorKind::DuplicateKey, "duplicate YAML mapping key"))
+                }
+                seen.set(identity, true);
+                values.push((key, normalize_value(item, budget, depth + 1)?));
+            }
+            Value::Mapping(values)
+        },
+        _ => value,
+    };
+    let raw_size = scalar_text(value).byte_len();
+    let normalized_size = if let Value::Null = normalized {
+        4
+    } else {
+        scalar_text(normalized).byte_len()
+    };
+    let size = if raw_size > normalized_size {
+        raw_size
+    } else {
+        normalized_size
+    };
+    if size > budget.limits.max_decoded_bytes - budget.bytes.get() {
+        return Result::Err(error(ErrorKind::Limit, "YAML scalar bytes exceed max_decoded_bytes"))
+    }
+    budget.bytes.set(budget.bytes.get() + size);
+    Result::Ok(normalized)
+}
+
+fn hex_escape(c: char) -> string {
+    let digits = "0123456789abcdef";
+    let n = c.to_u32().to_isize();
+    "\\u" + digits.get((n / 4096) % 16).to_string() + digits.get((n / 256) % 16).to_string()
+        + digits.get((n / 16) % 16).to_string()
+        + digits.get(n % 16).to_string()
+}
+
+fn quoted_character(c: char) -> string {
+    match c {
+        '"' => "\\\"",
+        '\\' => "\\\\",
+        '\n' => "\\n",
+        '\r' => "\\r",
+        '\t' => "\\t",
+        _ => if c.to_u32() < 32 || (c.to_u32() >= 127 && c.to_u32() <= 159) || c == '\u2028'
+            || c == '\u2029'
+            || c == '\ufffe'
+            || c == '\uffff' {
+            hex_escape(c)
+        } else {
+            c.to_string()
+        },
+    }
+}
+
+fn quoted_output(writer: Output, value: string) -> Result[(), Error] {
+    output(writer, "\"")?;
+    for c in value.chars() {
+        output(writer, quoted_character(c))?;
+    }
+    output(writer, "\"")
+}
+
+fn explicit_key(value: Value) -> bool {
+    if let Value::String(value) = value {
+        let mut size = 2;
+        for c in value.chars() {
+            size += quoted_character(c).byte_len();
+            if size >= 1024 {
+                return true
+            }
+        }
+        false
+    } else {
+        scalar_text(value).byte_len() >= 1024
+    }
+}
+
+fn literal_allowed(value: string) -> bool {
+    if !value.contains("\n") {
+        return false
+    }
+    for c in value.chars() {
+        if (c.to_u32() < 32 && c != '\n' && c != '\t') || (c.to_u32() >= 127 && c.to_u32() <= 159)
+            || c == '\u2028'
+            || c == '\u2029'
+            || c == '\ufffe'
+            || c == '\uffff' {
+            return false
+        }
+    }
+    true
+}
+
+fn emit_scalar(writer: Output, value: Value, indent: isize, key: bool) -> Result[(), Error] {
+    match value {
+        Value::Null => output(writer, "null"),
+        Value::Bool(value) => output(
+            writer,
+            if value {
+                "true"
+            } else {
+                "false"
+            },
+        ),
+        Value::Integer(value) | Value::Float(value) => output(writer, value),
+        Value::String(value) => {
+            if !key && literal_allowed(value) {
+                let mut trailing = 0;
+                let mut end = value.byte_len();
+                while end > 0 && byte_character(value, end - 1) == '\n' {
+                    end -= 1;
+                    trailing += 1;
+                }
+                output(
+                    writer,
+                    if trailing == 0 {
+                        "|" + writer.options.indent.to_string() + "-\n"
+                    } else if trailing == 1 && end > 0 {
+                        "|" + writer.options.indent.to_string() + "\n"
+                    } else {
+                        "|" + writer.options.indent.to_string() + "+\n"
+                    },
+                )?;
+                let padding = text::repeat(" ", indent + writer.options.indent);
+                let mut start = 0;
+                for (index, c) in value.char_indices() {
+                    if c == '\n' {
+                        output(writer, padding)?;
+                        output(writer, value.byte_slice(start, index))?;
+                        output(writer, "\n")?;
+                        start = index + 1;
+                    }
+                }
+                if start < value.byte_len() {
+                    output(writer, padding)?;
+                    output(writer, value.byte_slice(start, value.byte_len()))?;
+                    output(writer, "\n")?;
+                }
+                Result::Ok(())
+            } else {
+                quoted_output(writer, value)
+            }
+        },
+        Value::Sequence(_) => output(writer, "[]"),
+        Value::Mapping(_) => output(writer, "{}"),
+    }
+}
+
+fn nonempty_collection(value: Value) -> bool {
+    match value {
+        Value::Sequence(items) => !items.is_empty(),
+        Value::Mapping(items) => !items.is_empty(),
+        _ => false,
+    }
+}
+
+fn emit_inline(writer: Output, value: Value, indent: isize) -> Result[(), Error] {
+    emit_scalar(writer, value, indent, false)?;
+    if let Value::String(value) = value {
+        if literal_allowed(value) {
+            return Result::Ok(())
+        }
+    }
+    output(writer, "\n")
+}
+
+fn emit_block(writer: Output, value: Value, indent: isize) -> Result[(), Error] {
+    let padding = text::repeat(" ", indent);
+    match value {
+        Value::Sequence(items) => if items.is_empty() {
+            output(writer, padding)?;
+            output(writer, "[]\n")
+        } else {
+            for item in items {
+                output(writer, padding)?;
+                if nonempty_collection(item) {
+                    output(writer, "-\n")?;
+                    emit_block(writer, item, indent + writer.options.indent)?;
+                } else {
+                    output(writer, "- ")?;
+                    emit_inline(writer, item, indent)?;
+                }
+            }
+            Result::Ok(())
+        },
+        Value::Mapping(entries) => if entries.is_empty() {
+            output(writer, padding)?;
+            output(writer, "{}\n")
+        } else {
+            for (key, item) in entries {
+                output(writer, padding)?;
+                let explicit = explicit_key(key);
+                if explicit {
+                    output(writer, "? ")?;
+                }
+                emit_scalar(writer, key, indent, true)?;
+                if explicit {
+                    output(writer, "\n")?;
+                    output(writer, padding)?;
+                }
+                if nonempty_collection(item) {
+                    output(writer, ":\n")?;
+                    emit_block(writer, item, indent + writer.options.indent)?;
+                } else {
+                    output(writer, ": ")?;
+                    emit_inline(writer, item, indent)?;
+                }
+            }
+            Result::Ok(())
+        },
+        _ => {
+            output(writer, padding)?;
+            emit_inline(writer, value, indent)
+        },
+    }
+}
+
+pub fn emit_documents_with_options(values: Vec[Value], options: Options) -> Result[string, Error] {
+    validate(options)?;
+    if values.len() > options.limits.max_documents {
+        return Result::Err(error(ErrorKind::Limit, "YAML stream exceeds max_documents"))
+    }
+    let budget = Budget { limits: options.limits, bytes: Ref::new(0), nodes: Ref::new(0) };
+    let normalized = Vec::new();
+    for value in values {
+        normalized.push(normalize_value(value, budget, 1)?);
+    }
+    let writer = Output { pieces: text::StringBuilder::new(), bytes: Ref::new(0), options };
+    for i in 0..normalized.len() {
+        if i > 0 {
+            output(writer, "---\n")?;
+        }
+        emit_block(writer, normalized[i], 0)?;
+    }
+    Result::Ok(writer.pieces.finish())
+}

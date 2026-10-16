@@ -150,8 +150,8 @@ fn json_to_value(value: json::Value, depth: isize, limit: isize) -> Result[Value
 }
 
 pub fn to_json(value: Value) -> Result[json::Value, Error] {
-    let budget = Budget { limits: Limits::standard(), bytes: Ref::new(0), tokens: Vec::new() };
-    write_token(value, budget, 1)?;
+    let budget = Budget { limits: Limits::standard(), bytes: Ref::new(0), nodes: Ref::new(0) };
+    check_value_budget(value, budget, 1)?;
     value_to_json(value, 1, budget.limits.max_depth)
 }
 
@@ -159,8 +159,8 @@ pub fn from_json(value: json::Value) -> Result[Value, Error] {
     let limits = Limits::standard();
     let _ = json::encode_with_limits(value, serde_encode_limits(limits)).map_err(serde_error)?;
     let value = json_to_value(value, 1, limits.max_depth)?;
-    let budget = Budget { limits, bytes: Ref::new(0), tokens: Vec::new() };
-    write_token(value, budget, 1)?;
+    let budget = Budget { limits, bytes: Ref::new(0), nodes: Ref::new(0) };
+    check_value_budget(value, budget, 1)?;
     Result::Ok(value)
 }
 

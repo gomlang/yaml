@@ -1,0 +1,251 @@
+package yaml;
+
+use std::num;
+use std::math;
+use std::text;
+
+fn byte_character(value: string, index: isize) -> char {
+    if index < 0 || index >= value.byte_len() {
+        '\u0000'
+    } else {
+        char_from_u32(value.byte_get(index).to_u32()).unwrap_or('\ufffd')
+    }
+}
+
+fn digit(character: char) -> isize {
+    if character >= '0' && character <= '9' {
+        character.to_u32().to_isize() - 48
+    } else if character >= 'a' && character <= 'f' {
+        character.to_u32().to_isize() - 87
+    } else if character >= 'A' && character <= 'F' {
+        character.to_u32().to_isize() - 55
+    } else {
+        -1
+    }
+}
+
+fn integer_syntax(value: string) -> (bool, isize, isize) {
+    let mut start = 0;
+    let mut base = 10;
+    if value.starts_with("0x") {
+        base = 16;
+        start = 2;
+    } else if value.starts_with("0o") {
+        base = 8;
+        start = 2;
+    } else if value.starts_with("+") || value.starts_with("-") {
+        start = 1;
+    }
+    if start == value.byte_len() {
+        return (false, base, start)
+    }
+    for i in start..value.byte_len() {
+        let n = digit(byte_character(value, i));
+        if n < 0 || n >= base {
+            return (false, base, start)
+        }
+    };
+    (true, base, start)
+}
+
+fn decimal_float_syntax(value: string) -> bool {
+    let mut i = 0;
+    if value.starts_with("+") || value.starts_with("-") {
+        i += 1;
+    }
+    let mut digits = 0;
+    while i < value.byte_len() && byte_character(value, i) >= '0' && byte_character(value, i) <= '9' {
+        i += 1;
+        digits += 1;
+    }
+    if i < value.byte_len() && byte_character(value, i) == '.' {
+        i += 1;
+        while i < value.byte_len() && byte_character(value, i) >= '0'
+            && byte_character(value, i) <= '9' {
+            i += 1;
+            digits += 1;
+        }
+    }
+    if digits == 0 {
+        return false
+    }
+    if i < value.byte_len() && (byte_character(value, i) == 'e' || byte_character(value, i) == 'E') {
+        i += 1;
+        if i < value.byte_len()
+            && (byte_character(value, i) == '+' || byte_character(value, i) == '-') {
+            i += 1;
+        }
+        let start = i;
+        while i < value.byte_len() && byte_character(value, i) >= '0'
+            && byte_character(value, i) <= '9' {
+            i += 1;
+        }
+        if start == i {
+            return false
+        }
+    }
+    i == value.byte_len()
+}
+
+fn normalize_integer(value: string, base: isize, start: isize) -> string {
+    if base == 10 {
+        let mut index = start;
+        while index < value.byte_len() && byte_character(value, index) == '0' {
+            index += 1;
+        }
+        if index == value.byte_len() {
+            return "0"
+        }
+        let sign = if value.starts_with("-") {
+            "-"
+        } else {
+            ""
+        };
+        return sign + value.byte_slice(index, value.byte_len())
+    }
+    let digits = Vec::from_array([0]);
+    for index in start..value.byte_len() {
+        let mut carry = digit(byte_character(value, index));
+        for i in 0..digits.len() {
+            let next = digits[i] * base + carry;
+            digits[i] = next % 10;
+            carry = next / 10;
+        }
+        while carry > 0 {
+            digits.push(carry % 10);
+            carry /= 10;
+        }
+    }
+    let parts = Vec::new();
+    let mut i = digits.len();
+    while i > 0 {
+        i -= 1;
+        parts.push(digits[i].to_string());
+    }
+    text::join(parts, "")
+}
+
+fn normalize_float(value: string) -> Result[string, Error] {
+    let number = num::parse_float64_structured(value).map_err(
+        |_| error(ErrorKind::Unsupported, "YAML float exceeds finite float64 range"),
+    )?;
+    if !math::is_finite(number) {
+        return Result::Err(error(ErrorKind::Unsupported, "YAML float exceeds finite float64 range"))
+    }
+    let formatted = num::format_float64_shortest(number, num::FloatNotation::General, 4096).map_err(
+        |_| error(ErrorKind::Limit, "YAML float formatting exceeds limit"),
+    )?;
+    Result::Ok(
+        if formatted.contains(".") || formatted.contains("e") || formatted.contains("E") {
+            formatted
+        } else {
+            formatted + ".0"
+        },
+    )
+}
+
+fn core_scalar(value: string, tag: string, quoted: bool) -> Result[Value, Error] {
+    if tag == "!" || tag == "!!str" || (tag == "" && quoted) {
+        return Result::Ok(Value::String(value))
+    }
+    let mut result = match value {
+        "" | "~" | "null" | "Null" | "NULL" => Value::Null,
+        "true" | "True" | "TRUE" => Value::Bool(true),
+        "false" | "False" | "FALSE" => Value::Bool(false),
+        ".inf" | ".Inf" | ".INF" | "+.inf" | "+.Inf" | "+.INF" => Value::Float(".inf"),
+        "-.inf" | "-.Inf" | "-.INF" => Value::Float("-.inf"),
+        ".nan" | ".NaN" | ".NAN" => Value::Float(".nan"),
+        _ => {
+            let (integer, base, start) = integer_syntax(value);
+            if integer || decimal_float_syntax(value) {
+                if value.byte_len() > 4096 {
+                    return Result::Err(
+                        error(ErrorKind::Limit, "YAML numeric scalar exceeds 4096 bytes"),
+                    )
+                }
+                if integer {
+                    Value::Integer(normalize_integer(value, base, start))
+                } else {
+                    Value::Float(normalize_float(value)?)
+                }
+            } else {
+                Value::String(value)
+            }
+        },
+    };
+    let valid = match tag {
+        "" => true,
+        "!!null" => if let Value::Null = result {
+            true
+        } else {
+            false
+        },
+        "!!bool" => if let Value::Bool(_) = result {
+            true
+        } else {
+            false
+        },
+        "!!int" => if let Value::Integer(_) = result {
+            true
+        } else {
+            false
+        },
+        "!!float" => {
+            if let Value::Integer(_) = result {
+                let (_, base, _) = integer_syntax(value);
+                if base != 10 {
+                    return Result::Err(error(ErrorKind::Syntax, "invalid explicit float scalar"))
+                }
+                result = Value::Float(normalize_float(value)?);
+            }
+            if let Value::Float(_) = result {
+                true
+            } else {
+                false
+            }
+        },
+        _ => return Result::Err(error(ErrorKind::Unsupported, "unsupported YAML tag: " + tag)),
+    };
+    if !valid {
+        return Result::Err(error(ErrorKind::Syntax, "invalid explicit YAML scalar: " + tag))
+    }
+    Result::Ok(result)
+}
+
+fn scalar_text(value: Value) -> string {
+    match value {
+        Value::Null => "",
+        Value::Bool(value) => if value {
+            "true"
+        } else {
+            "false"
+        },
+        Value::Integer(value) | Value::Float(value) | Value::String(value) => value,
+        _ => "",
+    }
+}
+
+fn key_identity(value: Value) -> Result[string, Error] {
+    match value {
+        Value::Null => Result::Ok("null:"),
+        Value::Bool(value) => Result::Ok(
+            "bool:"
+                + if value {
+                    "true"
+                } else {
+                    "false"
+                },
+        ),
+        Value::Integer(value) => Result::Ok("integer:" + value),
+        Value::Float(value) => Result::Ok(
+            "float:"
+                + if value == "-0.0" {
+                    "0.0"
+                } else {
+                    value
+                },
+        ),
+        Value::String(value) => Result::Ok("string:" + value),
+        _ => Result::Err(error(ErrorKind::Unsupported, "YAML mapping keys must be scalars")),
+    }
+}

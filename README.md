@@ -1,6 +1,6 @@
 # yaml
 
-Bounded YAML parsing, emission, and Serde conversion for GoML. Requires a current GoML toolchain supporting unversioned registry dependencies; see [the pinned ecosystem toolchain](https://github.com/gomlang/workflows/blob/main/ci/toolchain.json). The public API is GoML; syntax parsing and emission use the YAML organization's [`go.yaml.in/yaml/v3`](https://github.com/yaml/go-yaml) v3.0.5 through explicit Go FFI declarations. Go 1.26 or newer is required. There are no C dependencies.
+Bounded YAML parsing, emission, and Serde conversion for GoML. Requires a current GoML toolchain supporting unversioned registry dependencies; see [the pinned ecosystem toolchain](https://github.com/gomlang/workflows/blob/main/ci/toolchain.json). Parsing, scalar resolution, bounded alias expansion, emission, and Serde conversion are implemented in GoML. There are no native adapters or external Go module dependencies.
 
 The library implements an application-oriented subset of the [YAML 1.2.2 core schema](https://yaml.org/spec/1.2.2/#103-core-schema). It supports block and flow mappings/sequences, plain/single/double-quoted scalars, quoted escapes including `\/`, literal/folded block scalars with chomping and indentation indicators, comments, anchors and bounded alias expansion, explicit core tags, `%YAML 1.2` directives, and multiple documents. It does not claim complete YAML conformance or preserve presentation details.
 
@@ -29,7 +29,7 @@ fn save(settings: Settings) -> Result[string, yaml::Error] {
 }
 ```
 
-For native dependencies, the consuming module needs its own `go.mod`; GoML resolves the dependency's native module from its registered source. `[native].go-module` is needed by modules that own a Go adapter, as demonstrated by this library's root manifest. A consumer that only imports `ecosystem::yaml` does not need that declaration. `examples/basic` is an executable package inside this module. Its black-box tests independently define consumer types and load YAML through `ecosystem::config::Source::dynamic`, exercising layering, provenance, typed decoding, reload, and retention of the last good snapshot after invalid YAML.
+Consumers only need the GoML dependency declaration above; no `go.mod` or `[native]` configuration is required. `examples/basic` is an executable package inside this module. Its black-box tests independently define consumer types and load YAML through `ecosystem::config::Source::dynamic`, exercising layering, provenance, typed decoding, reload, and retention of the last good snapshot after invalid YAML.
 
 ## API
 
@@ -61,9 +61,9 @@ floats or manually constructed `Value::Float` values during emission.
 
 Unknown/custom tags, `!!binary`, timestamps as typed tags, YAML 1.1 merge keys (`<<`), complex mapping keys, recursive aliases, and references to anchors in other documents fail explicitly. Quoted `"<<"`, `!!str <<`, and `! <<` remain ordinary string keys and use the usual duplicate-key policy. Alias expansion produces values and does not preserve graph sharing or anchor names. Comments, quoting style, tags, and exact number spelling are not round-tripped.
 
-The backend has legacy syntax behavior in parts of the YAML grammar. Literal NEL (`U+0085`), LS (`U+2028`), and PS (`U+2029`) characters in source are therefore rejected rather than silently treated as line breaks; use double-quoted Unicode escapes for those string values. Emission always escapes these characters, including in strings that also contain ordinary newlines, so its output remains readable by the parser. UTF-8 input, LF/CRLF/CR line endings, and a UTF-8 stream BOM are supported. Remaining backend grammar differences may still produce syntax errors for otherwise valid YAML; the checked-in reference subset and regression tests document exercised behavior.
+Literal NEL (`U+0085`), LS (`U+2028`), and PS (`U+2029`) characters in source remain rejected; use double-quoted Unicode escapes for those string values. Emission always escapes these characters, including in strings that also contain ordinary newlines, so emitted values round-trip. UTF-8 input, LF/CRLF/CR line endings, and a UTF-8 stream BOM are supported. The checked-in reference subset and regression tests document the supported application grammar; the library does not claim complete YAML conformance.
 
-Two compatibility adaptations are bounded and syntax-aware. `%YAML 1.2` is normalized to a same-width backend directive only after the backend identifies an incompatible version at that exact source line. Double-quoted `\/` is normalized to an equivalent supported escape only after a backend error and a node-based probe confirms which escapes are active. Quoted directive text, plain/single-quoted/block scalar contents, and escaped backslashes are preserved. Source-column mappings account for inserted escape characters.
+Version directives and double-quoted `\/` escapes are parsed directly. Quoted directive text, plain/single-quoted/block scalar contents, and escaped backslashes retain their literal contents. Node positions count Unicode scalar values in the original source line.
 
 Slash escapes also work after complete verbatim core tags such as
 `!<tag:yaml.org,2002:str>`, including with anchors and intervening comments.
@@ -86,31 +86,26 @@ the same validation and decoded-byte limits.
 
 Depth starts at one for the document root. Keys and values count as nodes. Each alias dereference and each expanded target visit is charged. Scalar bytes charge the larger of the raw decoded scalar and its normalized representation, including repeated aliases and discarded duplicate values. Emission applies this per-scalar maximum across the entire document stream; shorter normalized scalars do not release another scalar's budget, and emitted `null` costs four scalar bytes. Numeric scalar spellings have a separate fixed 4096-byte ceiling before expensive integer conversion. Invalid options return `ErrorKind::Argument`.
 
-Input length is checked before entering the backend. The backend builds an unexpanded node graph within that input bound and its own parser nesting limit; user depth/node limits are applied after the graph is built, not as a streaming allocation ceiling. Alias expansion only occurs in the bounded adapter. Cycles are detected before expansion, and native parser construction never expands alias targets. Normalization retries and probes collectively consume at most 64 MiB of parsed input and 128 parsing attempts; valid inputs requiring more normalization work return `Limit`. Output uses a bounded writer. The GoML-to-native bridge additionally checks depth, nodes, and scalar bytes before materializing its flat token stream. Serde's intermediate JSON operations have bounds derived from these limits; user-supplied serializer code itself remains the caller's responsibility.
+Input length is checked before scanning. The parser constructs an unexpanded node graph, enforcing the source-node budget and a fixed construction-depth ceiling of 512. User depth and expanded-node limits apply during bounded resolution; alias targets are never copied during parsing. Alias cycles and cross-document references fail recoverably. Scalar and alias budgets accumulate across the document stream, including ignored duplicate values. Parsing handles directives and escapes in one pass without normalization retries. Emission validates values and budgets before writing through an output-size check. Serde's intermediate JSON operations have bounds derived from these limits; user-supplied serializer code itself remains the caller's responsibility.
 
-Errors expose `kind`, `message`, and one-based `line`/`column`. An unavailable coordinate is zero. Semantic errors such as duplicate keys, unsupported tags, and alias violations retain node positions. For native syntax errors, structured coordinates stay zero because backend message locations have inconsistent bases; the original native diagnostic is retained in `message`. All failures return `Result` values.
+Errors expose `kind`, `message`, and one-based `line`/`column`. An unavailable coordinate is zero. Semantic errors such as duplicate keys, unsupported tags, and alias violations retain node positions. Grammar errors retain zero structured coordinates; scalar-validation and semantic failures retain the relevant node location. All failures return `Result` values.
 
 ## Validation
 
-From the library root, prepare native dependencies and run the full isolated-registry checks:
+From the library root, run the isolated-registry verification:
 
 ```sh
-python3 ../workflows/ci/ecosystem.py native --libraries .. --module yaml
 (cd ../workflows && just ecosystem-test yaml)
 ```
 
-For individual checks with the ecosystem registry configured:
+For individual checks, provision the ecosystem registry first:
 
 ```sh
-go mod download
+export GOML_HOME="$(cd ../workflows && just ecosystem-test --registry-only yaml)"
 goml fmt --check
 goml check
 goml test
 goml run --example basic
-go test ./adapter
-go test -race ./adapter
 ```
 
-Use an isolated ecosystem registry containing `ecosystem::config` for consumer tests. The ecosystem verification runner provisions it. Native tests compare all 36 pinned official YAML test-suite fixtures against their independent JSON results; see [fixture provenance and license](tests/data/reference/README.md). Additional tests cover core-schema differences, explicit/non-specific tags, alias bombs and cycles, every configurable budget, duplicate-key policy, source positions, Unicode/BOM/line endings, normalization, invalid dynamic values, bounded emission, and typed configuration integration.
-
-The explicit declarations in `bindings/bindings.goml` call `adapter/` directly. Keep their signatures aligned with the Go functions; GoML trusts these declarations and the final Go build validates native compatibility.
+Use an isolated ecosystem registry containing `ecosystem::config` for consumer tests. The ecosystem verification runner provisions it. GoML tests compare all 36 pinned official YAML test-suite fixtures against their independent JSON results and retain 20 additional official syntax regressions; see [fixture provenance and license](tests/data/reference/README.md). Additional tests cover core-schema differences, explicit/non-specific tags, alias bombs and cycles, every configurable budget, duplicate-key policy, source positions, Unicode/BOM/line endings, normalization, invalid dynamic values, bounded emission, and typed configuration integration.

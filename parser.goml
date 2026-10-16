@@ -1,0 +1,1277 @@
+package yaml;
+
+use std::text;
+
+struct Node {
+    kind: string,
+    value: string,
+    tag: string,
+    quoted: bool,
+    children: Vec[isize],
+    target: isize,
+    line: isize,
+    column: isize,
+}
+
+struct Parser {
+    source: string,
+    position: Ref[isize],
+    lines: Vec[isize],
+    nodes: Vec[Node],
+    anchors: HashMap[string, isize],
+    previous_anchors: HashMap[string, bool],
+    handles: HashMap[string, string],
+    limits: Limits,
+    inline_document: isize,
+    last_location: Ref[(isize, isize, isize)],
+}
+
+fn character(parser: Parser, position: isize) -> char {
+    if position < 0 || position >= parser.source.byte_len() {
+        '\u0000'
+    } else {
+        match parser.source.decode_at(position) {
+            Some((value, _)) => value,
+            None => '\ufffd',
+        }
+    }
+}
+
+fn peek(parser: Parser) -> char {
+    character(parser, parser.position.get())
+}
+
+fn advance(parser: Parser) -> char {
+    let c = peek(parser);
+    if let Some((_, width)) = parser.source.decode_at(parser.position.get()) {
+        parser.position.set(parser.position.get() + width);
+    }
+    c
+}
+
+fn location(parser: Parser, position: isize) -> (isize, isize) {
+    let mut low = 0;
+    let mut high = parser.lines.len();
+    while low + 1 < high {
+        let mid = (low + high) / 2;
+        if parser.lines[mid] <= position {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    let (last, line, column) = parser.last_location.get();
+    let column = if line == low + 1 && position >= last {
+        column + parser.source.byte_slice(last, position).char_count()
+    } else {
+        parser.source.byte_slice(parser.lines[low], position).char_count() + 1
+    };
+    parser.last_location.set((position, low + 1, column));
+    (low + 1, column)
+}
+
+fn syntax(message: string) -> Error {
+    error(ErrorKind::Syntax, message)
+}
+
+fn at_node(problem: Error, node: Node) -> Error {
+    Error { line: node.line, column: node.column, ..problem }
+}
+
+fn blank(c: char) -> bool {
+    c == ' ' || c == '\t' || c == '\n' || c == '\u0000'
+}
+
+fn horizontal(parser: Parser) -> () {
+    while peek(parser) == ' ' || peek(parser) == '\t' {
+        advance(parser);
+    }
+}
+
+fn skip(parser: Parser) -> () {
+    loop {
+        horizontal(parser);
+        if peek(parser) == '#' {
+            while peek(parser) != '\n' && peek(parser) != '\u0000' {
+                advance(parser);
+            }
+        }
+        if peek(parser) != '\n' {
+            break
+        }
+        advance(parser);
+    }
+}
+
+fn marker(parser: Parser, value: string) -> bool {
+    let p = parser.position.get();
+    let (_, col) = location(parser, p);
+    col == 1 && parser.source.starts_with_at(p, value) && blank(character(parser, p + 3))
+}
+
+fn indicator(parser: Parser, value: char) -> bool {
+    peek(parser) == value && blank(character(parser, parser.position.get() + 1))
+}
+
+fn empty_node(parser: Parser, position: isize) -> Result[isize, Error] {
+    if parser.nodes.len() >= parser.limits.max_nodes {
+        return Result::Err(error(ErrorKind::Limit, "YAML source nodes exceed max_nodes"))
+    }
+    let (line, column) = location(parser, position);
+    let index = parser.nodes.len();
+    parser.nodes.push(
+        Node {
+            kind: "scalar",
+            value: "",
+            tag: "",
+            quoted: false,
+            children: Vec::new(),
+            target: -1,
+            line,
+            column,
+        },
+    );
+    Result::Ok(index)
+}
+
+fn line_mapping(parser: Parser) -> bool {
+    let mut p = parser.position.get();
+    let mut quote = '\u0000';
+    let mut level = 0;
+    let mut verbatim = false;
+    let mut plain = false;
+    let mut property = false;
+    while p < parser.source.byte_len() {
+        let c = character(parser, p);
+        if c == '\n' {
+            return false
+        }
+        if verbatim {
+            if c == '>' {
+                verbatim = false;
+                property = false;
+            }
+        } else if quote != '\u0000' {
+            if c == '\\' && quote == '"' {
+                p += 1;
+            } else if c == quote {
+                if quote == '\'' && character(parser, p + 1) == '\'' {
+                    p += 1;
+                } else {
+                    quote = '\u0000';
+                    plain = true;
+                }
+            }
+        } else if property {
+            if blank(c) {
+                property = false;
+            }
+        } else if !plain && (c == '!' || c == '&') {
+            property = true;
+            if c == '!' && character(parser, p + 1) == '<' {
+                verbatim = true;
+            }
+        } else if (c == '"' || c == '\'') && (!plain || level > 0) {
+            quote = c;
+        } else if (c == '[' || c == '{') && (!plain || level > 0) {
+            level += 1;
+            plain = true;
+        } else if (c == ']' || c == '}') && level > 0 {
+            level -= 1;
+        } else if c == '#'
+            && (p == parser.position.get() || blank(byte_character(parser.source, p - 1))) {
+            return false
+        } else if c == ':' && level == 0 && blank(character(parser, p + 1)) {
+            return true
+        } else if !blank(c) && level == 0 {
+            plain = true;
+        }
+        let Some((_, width)) = parser.source.decode_at(p) else {
+            return false
+        };
+        p += width;
+    }
+    false
+}
+
+fn read_name(parser: Parser) -> string {
+    let start = parser.position.get();
+    while !blank(peek(parser)) && peek(parser) != ',' && peek(parser) != '[' && peek(parser) != ']'
+        && peek(parser) != '{'
+        && peek(parser) != '}' {
+        advance(parser);
+    }
+    parser.source.byte_slice(start, parser.position.get())
+}
+
+fn decode_tag(value: string) -> Result[string, Error] {
+    let bytes = Vec::new();
+    let mut i = 0;
+    while i < value.byte_len() {
+        if byte_character(value, i) == '%' {
+            if i + 2 >= value.byte_len() {
+                return Result::Err(syntax("invalid YAML tag URI escape"))
+            }
+            let a = digit(byte_character(value, i + 1));
+            let b = digit(byte_character(value, i + 2));
+            if a < 0 || b < 0 {
+                return Result::Err(syntax("invalid YAML tag URI escape"))
+            }
+            bytes.push((a * 16 + b).to_u8());
+            i += 3;
+        } else {
+            bytes.push(value.byte_get(i));
+            i += 1;
+        }
+    }
+    let (valid, decoded) = string_from_utf8(bytes);
+    if !valid {
+        return Result::Err(syntax("YAML tag URI must be UTF-8"))
+    }
+    Result::Ok(
+        if decoded.starts_with("tag:yaml.org,2002:") {
+            "!!" + decoded.byte_slice(18, decoded.byte_len())
+        } else {
+            decoded
+        },
+    )
+}
+
+fn read_tag(parser: Parser) -> Result[string, Error] {
+    let start = parser.position.get();
+    advance(parser);
+    if peek(parser) == '<' {
+        advance(parser);
+        let from = parser.position.get();
+        while peek(parser) != '>' && !blank(peek(parser)) {
+            advance(parser);
+        }
+        if peek(parser) != '>' {
+            return Result::Err(syntax("unterminated YAML verbatim tag"))
+        }
+        let value = parser.source.byte_slice(from, parser.position.get());
+        advance(parser);
+        return decode_tag(value)
+    }
+    read_name(parser);
+    let tag = parser.source.byte_slice(start, parser.position.get());
+    if tag == "!" {
+        return Result::Ok(tag)
+    }
+    if tag.starts_with("!!") {
+        let prefix = parser.handles.get("!!").unwrap_or("tag:yaml.org,2002:");
+        return decode_tag(prefix + tag.byte_slice(2, tag.byte_len()))
+    }
+    let mut handle_end = 0;
+    for i in 1..tag.byte_len() {
+        if byte_character(tag, i) == '!' {
+            handle_end = i + 1;
+            break
+        }
+    }
+    if handle_end > 0 {
+        let handle = tag.byte_slice(0, handle_end);
+        let Some(prefix) = parser.handles.get(handle) else {
+            return Result::Err(syntax("undefined YAML tag handle"))
+        };
+        decode_tag(prefix + tag.byte_slice(handle_end, tag.byte_len()))
+    } else {
+        if let Some(prefix) = parser.handles.get("!") {
+            decode_tag(prefix + tag.byte_slice(1, tag.byte_len()))
+        } else {
+            decode_tag(tag)
+        }
+    }
+}
+
+fn escaped_character(parser: Parser) -> Result[string, Error] {
+    let c = advance(parser);
+    let value = match c {
+        '0' => "\u0000",
+        'a' => "\u0007",
+        'b' => "\u0008",
+        't' | '\t' => "\t",
+        'n' => "\n",
+        'v' => "\u000b",
+        'f' => "\u000c",
+        'r' => "\r",
+        'e' => "\u001b",
+        ' ' => " ",
+        '"' => "\"",
+        '/' => "/",
+        '\\' => "\\",
+        'N' => "\u0085",
+        '_' => "\u00a0",
+        'L' => "\u2028",
+        'P' => "\u2029",
+        'x' | 'u' | 'U' => {
+            let count = if c == 'x' {
+                2
+            } else if c == 'u' {
+                4
+            } else {
+                8
+            };
+            let mut code: u32 = 0;
+            for _ in 0..count {
+                let n = digit(advance(parser));
+                if n < 0 {
+                    return Result::Err(syntax("invalid YAML Unicode escape"))
+                }
+                if code > 0x10ffff / 16 {
+                    return Result::Err(syntax("invalid YAML Unicode scalar"))
+                }
+                code = code * 16 + n.to_u32();
+            }
+            let Some(character) = char_from_u32(code) else {
+                return Result::Err(syntax("invalid YAML Unicode scalar"))
+            };
+            character.to_string()
+        },
+        _ => return Result::Err(syntax("unknown YAML escape character")),
+    };
+    Result::Ok(value)
+}
+
+fn quoted_scalar(parser: Parser) -> Result[string, Error] {
+    let quote = advance(parser);
+    let parts = text::StringBuilder::new();
+    let pending = text::StringBuilder::new();
+    loop {
+        if marker(parser, "---") || marker(parser, "...") {
+            return Result::Err(syntax("document marker inside YAML quoted scalar"))
+        }
+        let c = advance(parser);
+        if c == '\u0000' {
+            return Result::Err(syntax("unterminated YAML quoted scalar"))
+        }
+        if c == quote {
+            if quote == '\'' && peek(parser) == '\'' {
+                advance(parser);
+                parts.write_string(pending.finish());
+                pending.clear();
+                parts.write_string("'");
+                continue
+            }
+            parts.write_string(pending.finish());
+            return Result::Ok(parts.finish())
+        }
+        if c == '\\' && quote == '"' {
+            parts.write_string(pending.finish());
+            pending.clear();
+            if peek(parser) == '\n' {
+                advance(parser);
+                horizontal(parser);
+                while peek(parser) == '\n' {
+                    parts.write_string("\n");
+                    advance(parser);
+                    horizontal(parser);
+                }
+            } else {
+                parts.write_string(escaped_character(parser)?);
+            }
+        } else if c == '\n' {
+            pending.clear();
+            let mut breaks = 1;
+            horizontal(parser);
+            while peek(parser) == '\n' {
+                advance(parser);
+                breaks += 1;
+                horizontal(parser);
+            }
+            parts.write_string(
+                if breaks == 1 {
+                    " "
+                } else {
+                    text::repeat("\n", breaks - 1)
+                },
+            );
+        } else if c == ' ' || c == '\t' {
+            pending.write_char(c);
+        } else {
+            parts.write_string(pending.finish());
+            pending.clear();
+            parts.write_string(c.to_string());
+        }
+    }
+}
+
+fn plain_scalar(parser: Parser, parent_indent: isize, flow: bool, key: bool) -> Result[
+    string,
+    Error,
+] {
+    let parts = Vec::new();
+    let mut start = parser.position.get();
+    let mut end = start;
+    loop {
+        let c = peek(parser);
+        if c == '\u0000' || (flow && (c == ',' || c == '[' || c == ']' || c == '{' || c == '}')) {
+            break
+        }
+        if c == ':'
+            && (blank(character(parser, parser.position.get() + 1))
+                || (flow
+                    && (character(parser, parser.position.get() + 1) == ','
+                        || character(parser, parser.position.get() + 1) == ']'
+                        || character(parser, parser.position.get() + 1) == '}'))) {
+            break
+        }
+        if c == '#'
+            && (parser.position.get() == start
+                || blank(byte_character(parser.source, parser.position.get() - 1))) {
+            break
+        }
+        if c == '\n' {
+            if key && !flow {
+                break
+            }
+            let saved = parser.position.get();
+            let line = location(parser, saved).0;
+            advance(parser);
+            horizontal(parser);
+            while peek(parser) == '\n' {
+                advance(parser);
+                horizontal(parser);
+            }
+            let (next_line, col) = location(parser, parser.position.get());
+            if peek(parser) == '\u0000' || peek(parser) == '#' || marker(parser, "---")
+                || marker(parser, "...")
+                || (flow
+                    && (peek(parser) == ',' || peek(parser) == ']' || peek(parser) == '}'
+                        || peek(parser) == ':'
+                        || peek(parser) == '['
+                        || peek(parser) == '{'))
+                || (!flow && col - 1 <= parent_indent)
+                || (!flow && line_mapping(parser)) {
+                parser.position.set(saved);
+                break
+            }
+            parts.push(parser.source.byte_slice(start, end));
+            parts.push(
+                if next_line - line == 1 {
+                    " "
+                } else {
+                    text::repeat("\n", next_line - line - 1)
+                },
+            );
+            start = parser.position.get();
+            end = start;
+            continue
+        }
+        advance(parser);
+        if c != ' ' && c != '\t' {
+            end = parser.position.get();
+        }
+    }
+    parts.push(parser.source.byte_slice(start, end));
+    Result::Ok(text::join(parts, ""))
+}
+
+fn folded_blank(lines: Vec[string], index: isize) -> bool {
+    if lines[index] != "" || index == 0 || lines[index - 1] == ""
+        || lines[index - 1].starts_with(" ")
+        || lines[index - 1].starts_with("\t") {
+        return false
+    }
+    let mut next = index + 1;
+    while next < lines.len() && lines[next] == "" {
+        next += 1;
+    }
+    next < lines.len() && !lines[next].starts_with(" ") && !lines[next].starts_with("\t")
+}
+
+fn block_scalar(parser: Parser, parent_indent: isize) -> Result[string, Error] {
+    let folded = advance(parser) == '>';
+    let mut chomp = ' ';
+    let mut amount = 0;
+    for _ in 0..2 {
+        let c = peek(parser);
+        if c == '+' || c == '-' {
+            if chomp != ' ' {
+                return Result::Err(syntax("duplicate YAML chomping indicator"))
+            }
+            chomp = advance(parser);
+        } else if c >= '1' && c <= '9' {
+            if amount != 0 {
+                return Result::Err(syntax("duplicate YAML indentation indicator"))
+            }
+            amount = digit(advance(parser));
+        } else {
+            break
+        }
+    }
+    horizontal(parser);
+    if peek(parser) == '#' {
+        while peek(parser) != '\n' && peek(parser) != '\u0000' {
+            advance(parser);
+        }
+    }
+    if peek(parser) != '\n' && peek(parser) != '\u0000' {
+        return Result::Err(syntax("invalid YAML block scalar header"))
+    }
+    if peek(parser) == '\n' {
+        advance(parser);
+    }
+    let baseline = if parent_indent < 0 {
+        0
+    } else {
+        parent_indent
+    };
+    let mut indent = if amount > 0 {
+        baseline + amount
+    } else {
+        -1
+    };
+    let mut probe = parser.position.get();
+    let mut leading = 0;
+    while probe < parser.source.byte_len() && indent < 0 {
+        let start = probe;
+        while character(parser, probe) == ' ' {
+            probe += 1;
+        }
+        let count = probe - start;
+        if character(parser, probe) == '\n' {
+            if count > leading {
+                leading = count;
+            }
+            probe += 1;
+        } else if character(parser, probe) == '\u0000' {
+            if count > leading {
+                leading = count;
+            }
+            break
+        } else {
+            indent = count;
+        }
+    }
+    if indent < 0 {
+        indent = if leading > baseline {
+            leading
+        } else {
+            baseline + 1
+        };
+    }
+    if indent <= baseline {
+        indent = baseline + 1;
+    }
+    if amount == 0 && leading > indent {
+        return Result::Err(syntax("leading block scalar whitespace exceeds indentation"))
+    }
+    let lines = Vec::new();
+    let breaks = Vec::new();
+    while parser.position.get() < parser.source.byte_len() {
+        let start = parser.position.get();
+        let mut content = start;
+        while character(parser, content) == ' ' {
+            content += 1;
+        }
+        let spaces = content - start;
+        let empty = character(parser, content) == '\n' || character(parser, content) == '\u0000';
+        if spaces < indent && character(parser, content) == '\t' {
+            return Result::Err(syntax("tabs cannot indent YAML block scalars"))
+        }
+        if !empty && spaces < indent {
+            break
+        }
+        let from = start
+            + if spaces < indent {
+                spaces
+            } else {
+                indent
+            };
+        let mut end = content;
+        while character(parser, end) != '\n' && character(parser, end) != '\u0000' {
+            let Some((_, width)) = parser.source.decode_at(end) else {
+                break
+            };
+            end += width;
+        }
+        lines.push(parser.source.byte_slice(from, end));
+        let terminated = character(parser, end) == '\n';
+        breaks.push(terminated);
+        parser.position.set(
+            if terminated {
+                end + 1
+            } else {
+                end
+            },
+        );
+    }
+    let parts = Vec::new();
+    for i in 0..lines.len() {
+        parts.push(lines[i]);
+        if breaks[i] {
+            if folded && i + 1 < lines.len() && lines[i] != "" && lines[i + 1] != ""
+                && !lines[i].starts_with(" ")
+                && !lines[i].starts_with("\t")
+                && !lines[i + 1].starts_with(" ")
+                && !lines[i + 1].starts_with("\t") {
+                parts.push(" ");
+            } else if folded && folded_blank(lines, i) {} else {
+                parts.push("\n");
+            }
+        }
+    }
+    let output = text::join(parts, "");
+    if chomp == '+' {
+        return Result::Ok(output)
+    }
+    let mut end = output.byte_len();
+    while end > 0 && byte_character(output, end - 1) == '\n' {
+        end -= 1;
+    }
+    Result::Ok(
+        output.byte_slice(0, end)
+            + if chomp != '-' && end > 0 && end < output.byte_len() {
+                "\n"
+            } else {
+                ""
+            },
+    )
+}
+
+fn parse_flow(parser: Parser, index: isize, depth: isize) -> Result[(), Error] {
+    let mapping = advance(parser) == '{';
+    let closing = if mapping {
+        '}'
+    } else {
+        ']'
+    };
+    let children = Vec::new();
+    skip(parser);
+    while peek(parser) != closing {
+        if peek(parser) == '\u0000' {
+            return Result::Err(syntax("unterminated YAML flow collection"))
+        }
+        let explicit = indicator(parser, '?');
+        if explicit {
+            advance(parser);
+            skip(parser);
+        }
+        if peek(parser) == ':' && !explicit {
+            return Result::Err(syntax("expected YAML mapping key"))
+        }
+        let key = if peek(parser) == ':'
+            || (explicit && (peek(parser) == closing || peek(parser) == ',')) {
+            empty_node(parser, parser.position.get())?
+        } else {
+            parse_node(parser, -1, true, false, true, depth + 1, false)?
+        };
+        skip(parser);
+        if peek(parser) == ':' {
+            if !explicit && parser.nodes[key].line != location(parser, parser.position.get()).0 {
+                return Result::Err(syntax("implicit YAML flow keys must stay on one line"))
+            }
+            advance(parser);
+            skip(parser);
+            let value = if peek(parser) == ',' || peek(parser) == closing {
+                empty_node(parser, parser.position.get())?
+            } else {
+                parse_node(parser, -1, true, false, false, depth + 1, false)?
+            };
+            if mapping {
+                children.push(key);
+                children.push(value);
+            } else {
+                let pair = empty_node(parser, parser.position.get())?;
+                parser.nodes[pair] = Node {
+                    kind: "mapping",
+                    children: Vec::from_array([key, value]),
+                    ..parser.nodes[pair],
+                };
+                children.push(pair);
+            }
+        } else if mapping {
+            children.push(key);
+            children.push(empty_node(parser, parser.position.get())?);
+        } else if explicit {
+            let value = empty_node(parser, parser.position.get())?;
+            let pair = empty_node(parser, parser.position.get())?;
+            parser.nodes[pair] = Node {
+                kind: "mapping",
+                children: Vec::from_array([key, value]),
+                ..parser.nodes[pair],
+            };
+            children.push(pair);
+        } else {
+            children.push(key);
+        }
+        skip(parser);
+        if peek(parser) == closing {
+            break
+        }
+        if peek(parser) != ',' {
+            return Result::Err(syntax("expected comma in YAML flow collection"))
+        }
+        advance(parser);
+        skip(parser);
+    }
+    advance(parser);
+    parser.nodes[index] = Node {
+        kind: if mapping {
+            "mapping"
+        } else {
+            "sequence"
+        },
+        children,
+        ..parser.nodes[index],
+    };
+    Result::Ok(())
+}
+
+fn block_value(parser: Parser, indent: isize, depth: isize, indentless: bool, compact: bool) -> Result[
+    isize,
+    Error,
+] {
+    horizontal(parser);
+    if peek(parser) == '#' {
+        while peek(parser) != '\n' && peek(parser) != '\u0000' {
+            advance(parser);
+        }
+    }
+    if !compact && peek(parser) != '\n'
+        && (indicator(parser, '-') || indicator(parser, '?') || line_mapping(parser)) {
+        return Result::Err(syntax("block collections in mapping values require a new line"))
+    }
+    if peek(parser) == '\n' {
+        let saved = parser.position.get();
+        skip(parser);
+        let (_, column) = location(parser, parser.position.get());
+        if peek(parser) == '\u0000' || marker(parser, "---") || marker(parser, "...")
+            || (column - 1 <= indent
+                && !(indentless && column - 1 == indent && indicator(parser, '-'))) {
+            parser.position.set(saved);
+            return empty_node(parser, saved)
+        }
+    }
+    if peek(parser) == '\u0000' {
+        empty_node(parser, parser.position.get())
+    } else {
+        parse_node(parser, indent, false, true, false, depth, indentless)
+    }
+}
+
+fn check_block_collection_start(parser: Parser) -> Result[(), Error] {
+    if location(parser, parser.position.get()).0 == parser.inline_document {
+        return Result::Err(
+            syntax("block collections cannot follow document markers on the same line"),
+        )
+    }
+    let mut previous = parser.position.get() - 1;
+    while previous >= 0 {
+        if byte_character(parser.source, previous) == '\t' {
+            return Result::Err(syntax("tabs cannot indent YAML block collections"))
+        }
+        if byte_character(parser.source, previous) != ' ' {
+            break
+        }
+        previous -= 1;
+    }
+    Result::Ok(())
+}
+
+fn parse_block_sequence(parser: Parser, index: isize, indent: isize, depth: isize) -> Result[
+    (),
+    Error,
+] {
+    check_block_collection_start(parser)?;
+    let children = Vec::new();
+    loop {
+        advance(parser);
+        children.push(block_value(parser, indent, depth + 1, false, true)?);
+        skip(parser);
+        if !indicator(parser, '-') || location(parser, parser.position.get()).1 - 1 != indent {
+            break
+        }
+    }
+    parser.nodes[index] = Node { kind: "sequence", children, ..parser.nodes[index] };
+    Result::Ok(())
+}
+
+fn parse_block_mapping(parser: Parser, index: isize, indent: isize, depth: isize) -> Result[
+    (),
+    Error,
+] {
+    check_block_collection_start(parser)?;
+    let children = Vec::new();
+    loop {
+        let explicit = indicator(parser, '?');
+        if explicit {
+            advance(parser);
+            horizontal(parser);
+        }
+        let key = if peek(parser) == '\n' || peek(parser) == '#' || peek(parser) == '\u0000' {
+            if explicit {
+                block_value(parser, indent, depth + 1, true, true)?
+            } else {
+                empty_node(parser, parser.position.get())?
+            }
+        } else if indicator(parser, ':') {
+            return Result::Err(syntax("expected YAML mapping key"))
+        } else {
+            parse_node(parser, indent, false, explicit, !explicit, depth + 1, false)?
+        };
+        horizontal(parser);
+        if explicit {
+            skip(parser);
+        }
+        let value = if peek(parser) == ':' && blank(character(parser, parser.position.get() + 1)) {
+            advance(parser);
+            block_value(parser, indent, depth + 1, true, explicit)?
+        } else if explicit {
+            empty_node(parser, parser.position.get())?
+        } else {
+            return Result::Err(syntax("expected colon in YAML block mapping"))
+        };
+        children.push(key);
+        children.push(value);
+        skip(parser);
+        if peek(parser) == '\u0000' || marker(parser, "---") || marker(parser, "...")
+            || location(parser, parser.position.get()).1 - 1 != indent
+            || (!indicator(parser, '?') && !line_mapping(parser) && !indicator(parser, ':')) {
+            break
+        }
+    }
+    parser.nodes[index] = Node { kind: "mapping", children, ..parser.nodes[index] };
+    Result::Ok(())
+}
+
+fn parse_node(
+    parser: Parser,
+    parent_indent: isize,
+    flow: bool,
+    block: bool,
+    key: bool,
+    depth: isize,
+    indentless: bool,
+) -> Result[isize, Error] {
+    if depth > 512 {
+        return Result::Err(error(ErrorKind::Limit, "YAML parser nesting exceeds hard limit"))
+    }
+    let position = parser.position.get();
+    let index = empty_node(parser, position)?;
+    let (line, column) = location(parser, position);
+    let mut leading = parser.lines[line - 1];
+    while character(parser, leading) == ' ' {
+        leading += 1;
+    }
+    if !flow && character(parser, leading) == '\t' {
+        return Result::Err(syntax("tabs cannot indent YAML nodes"))
+    }
+    let indent = column - 1;
+    if block && !flow && !indicator(parser, '-')
+        && (indicator(parser, '?') || line_mapping(parser) || indicator(parser, ':')) {
+        parse_block_mapping(parser, index, indent, depth)?;
+        return Result::Ok(index)
+    }
+    let mut tag = "";
+    let mut anchored = false;
+    while peek(parser) == '&' || peek(parser) == '!' {
+        if peek(parser) == '&' {
+            if anchored {
+                return Result::Err(syntax("duplicate YAML anchor property"))
+            }
+            anchored = true;
+            advance(parser);
+            let name = read_name(parser);
+            if name == "" {
+                return Result::Err(syntax("empty YAML anchor name"))
+            }
+            if !blank(peek(parser))
+                && !(flow && (peek(parser) == ',' || peek(parser) == ']' || peek(parser) == '}')) {
+                return Result::Err(syntax("YAML anchor properties require separation"))
+            }
+            parser.anchors.set(name, index);
+            parser.previous_anchors.set(name, true);
+        } else {
+            if tag != "" {
+                return Result::Err(syntax("duplicate YAML tag property"))
+            }
+            tag = read_tag(parser)?;
+            if !blank(peek(parser))
+                && !(flow && (peek(parser) == ',' || peek(parser) == ']' || peek(parser) == '}')) {
+                return Result::Err(syntax("YAML tag properties require separation"))
+            }
+        }
+        horizontal(parser);
+        if peek(parser) == '#' {
+            while peek(parser) != '\n' && peek(parser) != '\u0000' {
+                advance(parser);
+            }
+        }
+        if peek(parser) == '\n' {
+            let saved = parser.position.get();
+            skip(parser);
+            if !flow
+                && (peek(parser) == '\u0000' || marker(parser, "---") || marker(parser, "...")
+                    || (location(parser, parser.position.get()).1 - 1 <= parent_indent
+                        && !(indentless
+                            && location(parser, parser.position.get()).1 - 1 == parent_indent
+                            && indicator(parser, '-')))) {
+                parser.position.set(saved);
+                break
+            }
+            if !flow && block
+                && (indicator(parser, '-') || indicator(parser, '?') || line_mapping(parser)) {
+                break
+            }
+        }
+    }
+    parser.nodes[index] = Node { tag, ..parser.nodes[index] };
+    if !flow && block && (indicator(parser, '?') || line_mapping(parser)) && !indicator(parser, '-') {
+        parse_block_mapping(parser, index, location(parser, parser.position.get()).1 - 1, depth)?;
+        return Result::Ok(index)
+    }
+    if !flow && block && indicator(parser, '-') && (anchored || tag != "")
+        && location(parser, parser.position.get()).0 == line {
+        return Result::Err(syntax("block sequence properties require a new line"))
+    }
+    if (tag != "" || anchored)
+        && ((key && indicator(parser, ':'))
+            || (flow && (peek(parser) == ',' || peek(parser) == ']' || peek(parser) == '}'))) {
+        return Result::Ok(index)
+    }
+    if flow && (marker(parser, "---") || marker(parser, "...")) {
+        return Result::Err(syntax("document marker inside YAML flow collection"))
+    }
+    if peek(parser) == '*' {
+        advance(parser);
+        let name = read_name(parser);
+        let target = match parser.anchors.get(name) {
+            Some(target) => target,
+            None => {
+                let kind = if parser.previous_anchors.get(name).is_some() {
+                    ErrorKind::Alias
+                } else {
+                    ErrorKind::Syntax
+                };
+                let problem = error(
+                    kind,
+                    "YAML alias must reference an anchor in the same document",
+                );
+                return Result::Err(
+                    if kind == ErrorKind::Alias {
+                        at_node(problem, parser.nodes[index])
+                    } else {
+                        problem
+                    },
+                )
+            },
+        };
+        if anchored || tag != "" {
+            return Result::Err(syntax("YAML aliases cannot have node properties"))
+        }
+        parser.nodes[index] = Node { kind: "alias", target, ..parser.nodes[index] };
+    } else if peek(parser) == '[' || peek(parser) == '{' {
+        parse_flow(parser, index, depth)?;
+    } else if !flow && block && indicator(parser, '-') {
+        parse_block_sequence(parser, index, location(parser, parser.position.get()).1 - 1, depth)?;
+    } else if !flow && block && (indicator(parser, '?') || line_mapping(parser)) {
+        parse_block_mapping(parser, index, location(parser, parser.position.get()).1 - 1, depth)?;
+    } else if peek(parser) == '\'' || peek(parser) == '"' {
+        let value = quoted_scalar(parser)?;
+        parser.nodes[index] = Node { value, quoted: true, ..parser.nodes[index] };
+    } else if !flow && (peek(parser) == '|' || peek(parser) == '>') {
+        let value = block_scalar(parser, parent_indent)?;
+        parser.nodes[index] = Node { value, quoted: true, ..parser.nodes[index] };
+    } else if peek(parser) != '\n' && peek(parser) != '\u0000' && peek(parser) != '#' {
+        if peek(parser) == '@' || peek(parser) == '`' || peek(parser) == '%' || peek(parser) == ','
+            || (!flow && (peek(parser) == ']' || peek(parser) == '}')) {
+            return Result::Err(syntax("invalid YAML scalar indicator"))
+        }
+        let value = plain_scalar(parser, parent_indent, flow, key)?;
+        if value == "" {
+            return Result::Err(syntax("expected YAML scalar"))
+        }
+        parser.nodes[index] = Node { value, ..parser.nodes[index] };
+    }
+    Result::Ok(index)
+}
+
+struct Resolver {
+    parser: Parser,
+    options: Options,
+    visits: Ref[isize],
+    aliases: Ref[isize],
+    bytes: Ref[isize],
+    active: HashMap[isize, bool],
+}
+
+fn resolve_node(resolver: Resolver, index: isize, depth: isize) -> Result[Value, Error] {
+    let node = resolver.parser.nodes[index];
+    let limits = resolver.options.limits;
+    if depth > limits.max_depth || resolver.visits.get() >= limits.max_nodes {
+        return Result::Err(
+            at_node(error(ErrorKind::Limit, "YAML expanded nodes exceed depth or node limit"), node),
+        )
+    }
+    resolver.visits.set(resolver.visits.get() + 1);
+    if resolver.active.get(index).unwrap_or(false) {
+        return Result::Err(at_node(error(ErrorKind::Alias, "recursive YAML alias"), node))
+    }
+    resolver.active.set(index, true);
+    let value = match node.kind {
+        "alias" => {
+            if resolver.aliases.get() >= limits.max_alias_expansions {
+                return Result::Err(
+                    at_node(
+                        error(ErrorKind::Limit, "YAML aliases exceed max_alias_expansions"),
+                        node,
+                    ),
+                )
+            }
+            resolver.aliases.set(resolver.aliases.get() + 1);
+            resolve_node(resolver, node.target, depth)?
+        },
+        "sequence" => {
+            if node.tag != "" && node.tag != "!" && node.tag != "!!seq" {
+                return Result::Err(
+                    at_node(
+                        error(ErrorKind::Unsupported, "unsupported YAML sequence tag: " + node.tag),
+                        node,
+                    ),
+                )
+            }
+            let values = Vec::new();
+            for child in node.children {
+                values.push(resolve_node(resolver, child, depth + 1)?);
+            }
+            Value::Sequence(values)
+        },
+        "mapping" => {
+            if node.tag != "" && node.tag != "!" && node.tag != "!!map" {
+                return Result::Err(
+                    at_node(
+                        error(ErrorKind::Unsupported, "unsupported YAML mapping tag: " + node.tag),
+                        node,
+                    ),
+                )
+            }
+            let entries = Vec::new();
+            let seen = HashMap::new();
+            let mut i = 0;
+            while i < node.children.len() {
+                let key_node = resolver.parser.nodes[node.children[i]];
+                if key_node.tag == "!!merge"
+                    || (key_node.kind == "scalar" && !key_node.quoted && key_node.tag == ""
+                        && key_node.value == "<<") {
+                    return Result::Err(
+                        at_node(
+                            error(ErrorKind::Unsupported, "YAML merge keys are not supported"),
+                            key_node,
+                        ),
+                    )
+                }
+                let key = resolve_node(resolver, node.children[i], depth + 1)?;
+                let identity = key_identity(key).map_err(|e| at_node(e, key_node))?;
+                let prior = seen.get(identity);
+                if prior.is_some() && resolver.options.duplicate_keys == DuplicateKeys::Reject {
+                    return Result::Err(
+                        at_node(
+                            error(ErrorKind::DuplicateKey, "duplicate YAML mapping key"),
+                            key_node,
+                        ),
+                    )
+                }
+                let item = resolve_node(resolver, node.children[i + 1], depth + 1)?;
+                if let Some(prior) = prior {
+                    if resolver.options.duplicate_keys == DuplicateKeys::LastWins {
+                        entries[prior] = (entries[prior].0, item);
+                    }
+                } else {
+                    seen.set(identity, entries.len());
+                    entries.push((key, item));
+                }
+                i += 2;
+            }
+            Value::Mapping(entries)
+        },
+        _ => {
+            if node.value.byte_len() > limits.max_decoded_bytes - resolver.bytes.get() {
+                return Result::Err(
+                    at_node(
+                        error(
+                            ErrorKind::Limit,
+                            "YAML expanded scalar bytes exceed max_decoded_bytes",
+                        ),
+                        node,
+                    ),
+                )
+            }
+            let value = core_scalar(node.value, node.tag, node.quoted).map_err(|e| at_node(e, node))?;
+            let normalized = scalar_text(value).byte_len();
+            let size = if normalized > node.value.byte_len() {
+                normalized
+            } else {
+                node.value.byte_len()
+            };
+            if size > limits.max_decoded_bytes - resolver.bytes.get() {
+                return Result::Err(
+                    at_node(
+                        error(
+                            ErrorKind::Limit,
+                            "YAML expanded scalar bytes exceed max_decoded_bytes",
+                        ),
+                        node,
+                    ),
+                )
+            }
+            resolver.bytes.set(resolver.bytes.get() + size);
+            value
+        },
+    };
+    resolver.active.set(index, false);
+    Result::Ok(value)
+}
+
+fn directive(parser: Parser, version: Ref[bool]) -> Result[(), Error] {
+    let start = parser.position.get();
+    while peek(parser) != '\n' && peek(parser) != '\u0000' && peek(parser) != '#' {
+        advance(parser);
+    }
+    let words = text::fields(parser.source.byte_slice(start, parser.position.get()), 16).map_err(
+        |_| syntax("invalid YAML directive"),
+    )?;
+    if words.len() == 0 {
+        return Result::Err(syntax("invalid YAML directive"))
+    }
+    if words[0] == "%YAML" {
+        if version.get() || words.len() != 2 || (words[1] != "1.1" && words[1] != "1.2") {
+            return Result::Err(syntax("invalid or repeated YAML version directive"))
+        }
+        version.set(true);
+    } else if words[0] == "%TAG" {
+        if words.len() != 3 || !words[1].starts_with("!") || !words[1].ends_with("!") {
+            return Result::Err(syntax("invalid YAML tag directive"))
+        }
+        if parser.handles.get(words[1]).is_some() {
+            return Result::Err(syntax("duplicate YAML tag directive"))
+        }
+        parser.handles.set(words[1], words[2]);
+    }
+    skip(parser);
+    Result::Ok(())
+}
+
+pub fn parse_documents_with_options(input: string, options: Options) -> Result[Vec[Value], Error] {
+    validate(options)?;
+    if input.byte_len() > options.limits.max_input_bytes {
+        return Result::Err(error(ErrorKind::Limit, "YAML input exceeds max_input_bytes"))
+    }
+    let parts = text::StringBuilder::with_capacity(input.byte_len());
+    let mut offset = 0;
+    while offset < input.byte_len() {
+        let Some((c, width)) = input.decode_at(offset) else {
+            return Result::Err(syntax("YAML input must be UTF-8"))
+        };
+        if c == '\u0085' || c == '\u2028' || c == '\u2029' {
+            return Result::Err(
+                error(
+                    ErrorKind::Unsupported,
+                    "literal legacy Unicode line separators require escaped scalar notation",
+                ),
+            )
+        }
+        let code = c.to_u32();
+        if (code < 32 && c != '\t' && c != '\n' && c != '\r') || (code >= 127 && code <= 159)
+            || code == 0xfffe
+            || code == 0xffff {
+            return Result::Err(syntax("invalid YAML source character"))
+        }
+        if offset == 0 && c == '\ufeff' {
+            offset += width;
+            continue
+        }
+        if c == '\r' {
+            parts.write_string("\n");
+            if offset + 1 < input.byte_len() && byte_character(input, offset + 1) == '\n' {
+                offset += 1;
+            }
+        } else {
+            parts.write_string(c.to_string());
+        }
+        offset += width;
+    }
+    let source = parts.finish();
+    let lines = Vec::from_array([0]);
+    for (index, c) in source.char_indices() {
+        if c == '\n' {
+            lines.push(index + 1);
+        }
+    }
+    let parser = Parser {
+        source,
+        position: Ref::new(0),
+        lines,
+        nodes: Vec::new(),
+        anchors: HashMap::new(),
+        previous_anchors: HashMap::new(),
+        handles: HashMap::new(),
+        limits: options.limits,
+        inline_document: 0,
+        last_location: Ref::new((0, 1, 1)),
+    };
+    let resolver = Resolver {
+        parser,
+        options,
+        visits: Ref::new(0),
+        aliases: Ref::new(0),
+        bytes: Ref::new(0),
+        active: HashMap::new(),
+    };
+    let documents = Vec::new();
+    skip(parser);
+    while peek(parser) != '\u0000' {
+        let document = Parser { anchors: HashMap::new(), handles: HashMap::new(), ..parser };
+        let mut directives = false;
+        let version = Ref::new(false);
+        while peek(document) == '%' && location(document, document.position.get()).1 == 1 {
+            directives = true;
+            directive(document, version)?;
+        }
+        let explicit = marker(document, "---");
+        let document = Parser {
+            inline_document: if explicit {
+                location(document, document.position.get()).0
+            } else {
+                0
+            },
+            ..document,
+        };
+        if directives && !explicit {
+            return Result::Err(syntax("YAML directives require a document start marker"))
+        }
+        if explicit {
+            document.position.set(document.position.get() + 3);
+            skip(document);
+        }
+        if documents.len() >= options.limits.max_documents {
+            return Result::Err(error(ErrorKind::Limit, "YAML stream exceeds max_documents"))
+        }
+        if !explicit && marker(document, "...") {
+            return Result::Err(syntax("unexpected YAML document end marker"))
+        }
+        let root = if peek(document) == '\u0000' || marker(document, "---")
+            || marker(document, "...") {
+            empty_node(document, document.position.get())?
+        } else {
+            parse_node(document, -1, false, true, false, 1, false)?
+        };
+        documents.push(resolve_node(Resolver { parser: document, ..resolver }, root, 1)?);
+        skip(document);
+        if marker(document, "...") {
+            document.position.set(document.position.get() + 3);
+            horizontal(document);
+            if peek(document) != '\n' && peek(document) != '\u0000' && peek(document) != '#' {
+                return Result::Err(syntax("invalid YAML document end marker"))
+            }
+            skip(document);
+            if peek(document) != '\u0000' && !marker(document, "---") && peek(document) != '%' {
+                return Result::Err(syntax("expected YAML document start marker"))
+            }
+        } else if peek(document) != '\u0000' && !marker(document, "---") {
+            return Result::Err(syntax("unexpected content after YAML document"))
+        }
+    }
+    Result::Ok(documents)
+}

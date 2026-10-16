@@ -1,0 +1,82 @@
+package yaml;
+
+fn validate(options: Options) -> Result[(), Error] {
+    let limits = options.limits;
+    if limits.max_input_bytes < 0 || limits.max_input_bytes > 16777216 || limits.max_depth < 1
+        || limits.max_depth > 512
+        || limits.max_nodes < 1
+        || limits.max_nodes > 1000000
+        || limits.max_alias_expansions < 0
+        || limits.max_alias_expansions > 100000
+        || limits.max_decoded_bytes < 0
+        || limits.max_decoded_bytes > 67108864
+        || limits.max_documents < 1
+        || limits.max_documents > 10000
+        || limits.max_output_bytes < 0
+        || limits.max_output_bytes > 67108864
+        || options.indent < 1
+        || options.indent > 8 {
+        return Result::Err(error(ErrorKind::Argument, "YAML options outside supported bounds"))
+    }
+    Result::Ok(())
+}
+
+pub fn parse_documents(input: string) -> Result[Vec[Value], Error] {
+    parse_documents_with_options(input, Options::standard())
+}
+
+pub fn parse_with_options(input: string, options: Options) -> Result[Value, Error] {
+    let values = parse_documents_with_options(input, options)?;
+    if values.is_empty() {
+        Result::Ok(Value::Null)
+    } else if values.len() == 1 {
+        Result::Ok(values[0])
+    } else {
+        Result::Err(error(ErrorKind::Syntax, "expected one YAML document"))
+    }
+}
+
+pub fn parse(input: string) -> Result[Value, Error] {
+    parse_with_options(input, Options::standard())
+}
+
+struct Budget {
+    limits: Limits,
+    bytes: Ref[isize],
+    nodes: Ref[isize],
+}
+
+fn check_value_budget(value: Value, budget: Budget, depth: isize) -> Result[(), Error] {
+    if depth > budget.limits.max_depth || budget.nodes.get() >= budget.limits.max_nodes {
+        return Result::Err(error(ErrorKind::Limit, "YAML value exceeds depth or node limit"))
+    }
+    let text = scalar_text(value);
+    if text.byte_len() > budget.limits.max_decoded_bytes - budget.bytes.get() {
+        return Result::Err(error(ErrorKind::Limit, "YAML scalar bytes exceed max_decoded_bytes"))
+    }
+    budget.bytes.set(budget.bytes.get() + text.byte_len());
+    budget.nodes.set(budget.nodes.get() + 1);
+    match value {
+        Value::Sequence(values) => for item in values {
+            check_value_budget(item, budget, depth + 1)?;
+        },
+        Value::Mapping(entries) => for (key, item) in entries {
+            check_value_budget(key, budget, depth + 1)?;
+            check_value_budget(item, budget, depth + 1)?;
+        },
+        _ => (),
+    }
+    Result::Ok(())
+}
+
+pub fn emit_documents(values: Vec[Value]) -> Result[string, Error] {
+    emit_documents_with_options(values, Options::standard())
+}
+
+pub fn emit_with_options(value: Value, options: Options) -> Result[string, Error] {
+    emit_documents_with_options(Vec::from_array([value]), options)
+}
+
+pub fn emit(value: Value) -> Result[string, Error] {
+    emit_with_options(value, Options::standard())
+}
