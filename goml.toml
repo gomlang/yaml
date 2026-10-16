@@ -1,5 +1,2 @@
 [module]
 path = "ecosystem::yaml"
-
-[dev-dependencies]
-"ecosystem::config" = true

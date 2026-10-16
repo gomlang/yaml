@@ -3,3 +3,6 @@ path = "downstream::yaml"
 
 [dependencies]
 "ecosystem::yaml" = true
+
+[dev-dependencies]
+"ecosystem::config" = true

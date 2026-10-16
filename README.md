@@ -29,7 +29,7 @@ fn save(settings: Settings) -> Result[string, yaml::Error] {
 }
 ```
 
-Consumers only need the GoML dependency declaration above; no `go.mod` or `[native]` configuration is required. `examples/basic` is an executable package inside this module. Its black-box tests independently define consumer types and load YAML through `ecosystem::config::Source::dynamic`, exercising layering, provenance, typed decoding, reload, and retention of the last good snapshot after invalid YAML.
+Consumers only need the GoML dependency declaration above; no `go.mod` or `[native]` configuration is required. `examples/basic` is an executable package inside this module. The separate `testdata/downstream/native` module defines consumer types and loads YAML through `ecosystem::config::Source::dynamic`, exercising layering, provenance, typed decoding, reload, and retention of the last good snapshot after invalid YAML.
 
 ## API
 
@@ -105,6 +105,7 @@ export GOML_HOME="$(cd ../workflows && just ecosystem-test --registry-only yaml)
 goml fmt --check
 goml check
 goml test
+(cd testdata/downstream/native && goml fmt --check && goml test)
 goml run --example basic
 ```
 
