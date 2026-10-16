@@ -1,0 +1,283 @@
+package tests;
+
+use ecosystem::yaml;
+use std::testing;
+use std::text;
+use std::fs;
+use std::json;
+use std::serde::{Deserialize};
+
+#[derive(Deserialize)]
+struct ExpectedNode {
+    kind: string,
+    text: string,
+    size: isize,
+}
+
+#[derive(Deserialize)]
+struct SyntaxRegression {
+    id: string,
+    source: string,
+    documents: isize,
+    nodes: Vec[ExpectedNode],
+}
+
+fn expected_syntax_value(nodes: Vec[ExpectedNode], position: Ref[isize]) -> yaml::Value {
+    let node = nodes[position.get()];
+    position.set(position.get() + 1);
+    match node.kind {
+        "null" => yaml::Value::Null,
+        "bool" => yaml::Value::Bool(node.text == "true"),
+        "string" => yaml::Value::String(node.text),
+        "integer" => yaml::Value::Integer(node.text),
+        "float" => yaml::Value::Float(node.text),
+        "sequence" => {
+            let values = Vec::new();
+            for _ in 0..node.size {
+                values.push(expected_syntax_value(nodes, position));
+            }
+            yaml::Value::Sequence(values)
+        },
+        _ => {
+            let entries = Vec::new();
+            for _ in 0..node.size {
+                let key = expected_syntax_value(nodes, position);
+                entries.push((key, expected_syntax_value(nodes, position)));
+            }
+            yaml::Value::Mapping(entries)
+        },
+    }
+}
+
+#[test]
+fn extended_official_syntax_regressions_preserve_values_and_properties() -> () {
+    let input = testing::expect_ok(
+        fs::read_file_structured("tests/data/syntax-regressions.json"),
+        "syntax fixtures",
+    );
+    let regressions: Vec[SyntaxRegression] = testing::expect_ok(
+        json::from_string(input),
+        "syntax expectations",
+    );
+    testing::assert_eq(regressions.len(), 20);
+    let failures = Vec::new();
+    for regression in regressions {
+        let expected = Vec::new();
+        let position = Ref::new(0);
+        for _ in 0..regression.documents {
+            expected.push(expected_syntax_value(regression.nodes, position));
+        }
+        testing::assert_eq(position.get(), regression.nodes.len());
+        match yaml::parse_documents(regression.source) {
+            Result::Err(problem) => failures.push(regression.id + ": " + problem.to_string()),
+            Result::Ok(actual) => if actual != expected {
+                failures.push(
+                    regression.id + " expected "
+                        + testing::expect_ok(yaml::emit_documents(expected), "expected")
+                        + " actual "
+                        + testing::expect_ok(yaml::emit_documents(actual), "actual"),
+                );
+            },
+        }
+    }
+    if !failures.is_empty() {
+        testing::fail(text::join(failures, "\n"));
+    }
+}
+
+#[test]
+fn malformed_block_scalar_and_property_boundaries_return_syntax_errors() -> () {
+    for source in Vec::from_array(
+        [
+            "a: b: c",
+            "a: - b",
+            "a: first\n  # comment\n  second",
+            "\"a\n---\nb\"",
+            "'a\n...\nb'",
+            "!<tag:yaml.org,2002:str>\"foo\"",
+            "{\"multi\nline\": value}",
+            "[key\n: value]",
+            "&anchor - entry",
+            "--- key1: value1\n    key2: value2",
+            "--- &anchor a: b",
+            "- !!str, xxx",
+            ",foo",
+            "a: ,foo",
+            "- ,foo",
+            "! ,foo",
+            "&a, foo",
+            "&a[]",
+            "&a{}",
+            "[&a[]]",
+            "k: &a[]",
+            "foo: |\n\t\nbar: 1\n",
+            "-\t-\n",
+            "- \t-\n",
+        ],
+    ) {
+        testing::assert_eq(
+            testing::expect_err(yaml::parse(source), "malformed boundary " + source).kind,
+            yaml::ErrorKind::Syntax,
+        );
+    }
+    for source in Vec::from_array(["? - a\n: b", "complex:\n  ? - a\n  : b", "?\n- a\n: b"]) {
+        testing::assert_eq(
+            testing::expect_err(yaml::parse(source), "complex key " + source).kind,
+            yaml::ErrorKind::Unsupported,
+        );
+    }
+}
+
+#[test]
+fn flow_boundary_whitespace_preserves_numeric_types_and_explicit_keys() -> () {
+    testing::assert_eq(
+        testing::expect_ok(yaml::parse("[1\n]"), "flow newline"),
+        yaml::Value::Sequence(Vec::from_array([yaml::Value::Integer("1")])),
+    );
+    testing::assert_eq(
+        testing::expect_some(
+            testing::expect_ok(yaml::parse("{a: 1\n}"), "mapping newline").field("a"),
+            "numeric field",
+        ),
+        yaml::Value::Integer("1"),
+    );
+    testing::assert_eq(
+        testing::expect_ok(yaml::parse("[?foo]"), "plain flow question mark"),
+        yaml::Value::Sequence(Vec::from_array([yaml::Value::String("?foo")])),
+    );
+    testing::assert_eq(
+        testing::expect_ok(yaml::parse("[? foo]"), "explicit flow pair"),
+        yaml::Value::Sequence(
+            Vec::from_array(
+                [
+                    yaml::Value::Mapping(
+                        Vec::from_array([(yaml::Value::String("foo"), yaml::Value::Null)]),
+                    ),
+                ],
+            ),
+        ),
+    );
+    for key in Vec::from_array(["a[bar", "a]bar", "a{bar", "a}bar"]) {
+        testing::assert_eq(
+            testing::expect_some(
+                testing::expect_ok(yaml::parse(key + ": value"), "plain brackets").field(key),
+                "plain key",
+            ),
+            yaml::Value::String("value"),
+        );
+    }
+}
+
+#[test]
+fn explicit_block_values_allow_compact_collections() -> () {
+    let sequence = yaml::Value::Sequence(
+        Vec::from_array([yaml::Value::String("one"), yaml::Value::String("two")]),
+    );
+    let expected = yaml::Value::Mapping(Vec::from_array([(yaml::Value::String("key"), sequence)]));
+    testing::assert_eq(
+        testing::expect_ok(yaml::parse("? key\n: - one\n  - two"), "explicit compact sequence"),
+        expected,
+    );
+    testing::assert_eq(
+        testing::expect_ok(
+            yaml::parse("- ? key\n  : - one\n    - two"),
+            "nested explicit compact sequence",
+        ),
+        yaml::Value::Sequence(Vec::from_array([expected])),
+    );
+    testing::assert_eq(
+        testing::expect_ok(yaml::parse("? key\n: a: b"), "explicit compact mapping"),
+        yaml::Value::Mapping(
+            Vec::from_array(
+                [
+                    (
+                        yaml::Value::String("key"),
+                        yaml::Value::Mapping(
+                            Vec::from_array([(yaml::Value::String("a"), yaml::Value::String("b"))]),
+                        ),
+                    ),
+                ],
+            ),
+        ),
+    );
+    testing::assert_eq(
+        testing::expect_ok(yaml::parse("-\t-1"), "tab-separated plain scalar"),
+        yaml::Value::Sequence(Vec::from_array([yaml::Value::Integer("-1")])),
+    );
+    testing::assert_eq(
+        testing::expect_ok(yaml::parse("--- &anchor\nkey: value"), "document root property"),
+        yaml::Value::Mapping(
+            Vec::from_array([(yaml::Value::String("key"), yaml::Value::String("value"))]),
+        ),
+    );
+}
+
+#[test]
+fn whitespace_only_block_scalars_respect_chomping_and_indentation() -> () {
+    for (header, expected) in Vec::from_array(
+        [("|", ""), ("|-", ""), ("|+", "\n"), (">", ""), (">-", ""), (">+", "\n")],
+    ) {
+        testing::assert_eq(
+            testing::expect_ok(yaml::parse(header + "\n  \n"), "empty root block"),
+            yaml::Value::String(expected),
+        );
+        let mapping = testing::expect_ok(
+            yaml::parse("key: " + header + "\n    \n"),
+            "empty mapping block",
+        );
+        testing::assert_eq(
+            testing::expect_some(mapping.field("key"), "empty block value"),
+            yaml::Value::String(expected),
+        );
+        testing::assert_eq(
+            testing::expect_ok(yaml::parse("- " + header + "\n    \n"), "empty sequence block"),
+            yaml::Value::Sequence(Vec::from_array([yaml::Value::String(expected)])),
+        );
+    }
+}
+
+#[test]
+fn unicode_byte_boundaries_remain_safe_in_scalars_tags_and_emission() -> () {
+    for source in Vec::from_array(["a中#", "7\ufeff#", "1中", "-1中", "0x中", "0o中"]) {
+        testing::assert_eq(
+            testing::expect_ok(yaml::parse(source), "Unicode plain scalar"),
+            yaml::Value::String(source),
+        );
+    }
+    testing::assert_eq(
+        testing::expect_ok(yaml::parse("- \"中#\""), "Unicode nested scalar"),
+        yaml::Value::Sequence(Vec::from_array([yaml::Value::String("中#")])),
+    );
+    for style in Vec::from_array(["|", ">"]) {
+        testing::assert_eq(
+            testing::expect_ok(yaml::parse(style + "\n  中\n"), "Unicode block scalar"),
+            yaml::Value::String("中\n"),
+        );
+    }
+    for value in Vec::from_array(["中\n", "a\n中", "中#", "😀\n", "é\n末", "\ufeff#"]) {
+        for node in Vec::from_array(
+            [
+                yaml::Value::String(value),
+                yaml::Value::Sequence(Vec::from_array([yaml::Value::String(value)])),
+                yaml::Value::Mapping(
+                    Vec::from_array([(yaml::Value::String(value), yaml::Value::String(value))]),
+                ),
+            ],
+        ) {
+            let emitted = testing::expect_ok(yaml::emit(node), "Unicode emission");
+            testing::assert_eq(testing::expect_ok(yaml::parse(emitted), "Unicode round trip"), node);
+        }
+    }
+    for source in Vec::from_array(["!中 foo", "!<tag:中> foo"]) {
+        testing::assert_eq(
+            testing::expect_err(yaml::parse(source), "Unicode custom tag").kind,
+            yaml::ErrorKind::Unsupported,
+        );
+    }
+    for source in Vec::from_array(["!<tag:%中> foo", "!<tag:%a中> foo"]) {
+        testing::assert_eq(
+            testing::expect_err(yaml::parse(source), "invalid tag URI escape").kind,
+            yaml::ErrorKind::Syntax,
+        );
+    }
+}

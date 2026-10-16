@@ -1,0 +1,92 @@
+package tests;
+
+use ecosystem::yaml;
+use std::fs;
+use std::io;
+use std::json;
+use std::testing;
+
+#[test]
+fn published_yaml_reference_corpus() -> () {
+    for id in Vec::from_array(
+        [
+            "33X3",
+            "3ALJ",
+            "3MYT",
+            "3R3P",
+            "3UYS",
+            "4GC6",
+            "4WA9",
+            "5KJE",
+            "6JQW",
+            "6VJK",
+            "6XDY",
+            "7A4E",
+            "7BUB",
+            "7W2P",
+            "8QBE",
+            "93JH",
+            "96L6",
+            "D88J",
+            "DWX9",
+            "FUP4",
+            "G4RS",
+            "G992",
+            "H3Z8",
+            "J9HZ",
+            "JHB9",
+            "JQ4R",
+            "JS2J",
+            "JTV5",
+            "M29M",
+            "M9B4",
+            "NP9H",
+            "PRH3",
+            "TE2A",
+            "V55R",
+            "W42U",
+            "ZH7C",
+        ],
+    ) {
+        let source = testing::expect_ok(
+            fs::read_file_structured("tests/data/reference/" + id + ".yaml"),
+            "read reference " + id,
+        );
+        let expected = testing::expect_ok(
+            fs::read_file_structured("tests/data/reference/" + id + ".json"),
+            "read independent expectation " + id,
+        );
+        let decoder = testing::expect_ok(
+            json::Decoder::new(
+                io::StringReader::new(expected),
+                json::DecodeLimits {
+                    max_input_bytes: 1048576,
+                    max_value_bytes: 1048576,
+                    max_depth: 128,
+                    max_values: 100000,
+                    max_string_bytes: 1048576,
+                    max_number_bytes: 4096,
+                    max_container_entries: 100000,
+                    max_path_bytes: 1048576,
+                    max_serde_frames: 512,
+                    max_events: 1000000,
+                },
+            ),
+            "JSON stream " + id,
+        );
+        let actual = testing::expect_ok(yaml::parse_documents(source), "reference YAML " + id);
+        for value in actual {
+            let wanted = testing::expect_some(
+                testing::expect_ok(decoder.next_value(), "read expected document " + id),
+                "expected document " + id,
+            );
+            testing::assert_eq(
+                value,
+                testing::expect_ok(yaml::from_json(wanted), "independent JSON " + id),
+            );
+        }
+        testing::assert(
+            testing::expect_ok(decoder.next_value(), "reference exhaustion " + id).is_none(),
+        );
+    }
+}

@@ -1,0 +1,184 @@
+package tests;
+
+use ecosystem::yaml;
+use std::testing;
+
+#[test]
+fn ignored_duplicate_values_still_validate_and_consume_expansion_budgets() -> () {
+    for policy in Vec::from_array([yaml::DuplicateKeys::FirstWins, yaml::DuplicateKeys::LastWins]) {
+        let options = yaml::Options { duplicate_keys: policy, ..yaml::Options::standard() };
+        testing::assert_eq(
+            testing::expect_err(
+                yaml::parse_with_options("a: 1\na: !custom value", options),
+                "discarded tag",
+            ).kind,
+            yaml::ErrorKind::Unsupported,
+        );
+        testing::assert_eq(
+            testing::expect_err(
+                yaml::parse_with_options("a: 1\na: &a [*a]", options),
+                "discarded cycle",
+            ).kind,
+            yaml::ErrorKind::Alias,
+        );
+        let limits = yaml::Limits { max_decoded_bytes: 5, ..options.limits };
+        testing::assert_eq(
+            testing::expect_err(
+                yaml::parse_with_options("a: x\na: word", yaml::Options { limits, ..options }),
+                "discarded bytes",
+            ).kind,
+            yaml::ErrorKind::Limit,
+        );
+    }
+}
+
+#[test]
+fn stream_budgets_charge_alias_nodes_and_scalars_across_documents() -> () {
+    let options = yaml::Options {
+        limits: yaml::Limits { max_nodes: 3, ..yaml::Limits::standard() },
+        ..yaml::Options::standard(),
+    };
+    testing::assert_eq(
+        testing::expect_err(
+            yaml::parse_with_options("[&a x, *a]", options),
+            "alias source and target visits",
+        ).kind,
+        yaml::ErrorKind::Limit,
+    );
+    let exact = yaml::Options { limits: yaml::Limits { max_nodes: 4, ..options.limits }, ..options };
+    testing::assert_ok(yaml::parse_with_options("[&a x, *a]", exact));
+    for limits in Vec::from_array(
+        [
+            yaml::Limits { max_nodes: 1, ..yaml::Limits::standard() },
+            yaml::Limits { max_decoded_bytes: 1, ..yaml::Limits::standard() },
+        ],
+    ) {
+        testing::assert_eq(
+            testing::expect_err(
+                yaml::parse_documents_with_options(
+                    "---\na\n---\nb",
+                    yaml::Options { limits, ..yaml::Options::standard() },
+                ),
+                "stream budget",
+            ).kind,
+            yaml::ErrorKind::Limit,
+        );
+    }
+    let options = yaml::Options {
+        limits: yaml::Limits { max_alias_expansions: 1, ..yaml::Limits::standard() },
+        ..yaml::Options::standard(),
+    };
+    testing::assert_eq(
+        testing::expect_err(
+            yaml::parse_documents_with_options("---\n[&a x, *a]\n---\n[&a y, *a]", options),
+            "stream aliases",
+        ).kind,
+        yaml::ErrorKind::Limit,
+    );
+}
+
+#[test]
+fn normalized_keys_preserve_scalar_tags_and_emission_always_rejects_duplicates() -> () {
+    let source = "1: integer\n1.0: float\ntrue: boolean\nnull: null\n'1': string";
+    let value = testing::expect_ok(yaml::parse(source), "tagged keys");
+    testing::assert_eq(
+        testing::expect_ok(
+            yaml::parse(testing::expect_ok(yaml::emit(value), "emit tagged keys")),
+            "tagged keys round trip",
+        ),
+        value,
+    );
+    let duplicate = yaml::Value::Mapping(
+        Vec::from_array(
+            [
+                (yaml::Value::Integer("01"), yaml::Value::Null),
+                (yaml::Value::Integer("+1"), yaml::Value::Null),
+            ],
+        ),
+    );
+    for policy in Vec::from_array(
+        [yaml::DuplicateKeys::Reject, yaml::DuplicateKeys::FirstWins, yaml::DuplicateKeys::LastWins],
+    ) {
+        testing::assert_eq(
+            testing::expect_err(
+                yaml::emit_with_options(
+                    duplicate,
+                    yaml::Options { duplicate_keys: policy, ..yaml::Options::standard() },
+                ),
+                "emission duplicate",
+            ).kind,
+            yaml::ErrorKind::DuplicateKey,
+        );
+    }
+}
+
+#[test]
+fn options_bounds_are_checked_before_parsing_or_emitting() -> () {
+    let standard = yaml::Limits::standard();
+    for limits in Vec::from_array(
+        [
+            yaml::Limits { max_input_bytes: -1, ..standard },
+            yaml::Limits { max_input_bytes: 16777217, ..standard },
+            yaml::Limits { max_depth: 0, ..standard },
+            yaml::Limits { max_depth: 513, ..standard },
+            yaml::Limits { max_nodes: 0, ..standard },
+            yaml::Limits { max_nodes: 1000001, ..standard },
+            yaml::Limits { max_alias_expansions: -1, ..standard },
+            yaml::Limits { max_alias_expansions: 100001, ..standard },
+            yaml::Limits { max_decoded_bytes: -1, ..standard },
+            yaml::Limits { max_decoded_bytes: 67108865, ..standard },
+            yaml::Limits { max_documents: 0, ..standard },
+            yaml::Limits { max_documents: 10001, ..standard },
+            yaml::Limits { max_output_bytes: -1, ..standard },
+            yaml::Limits { max_output_bytes: 67108865, ..standard },
+        ],
+    ) {
+        let options = yaml::Options { limits, ..yaml::Options::standard() };
+        testing::assert_eq(
+            testing::expect_err(yaml::parse_with_options("", options), "parse option").kind,
+            yaml::ErrorKind::Argument,
+        );
+        testing::assert_eq(
+            testing::expect_err(yaml::emit_with_options(yaml::Value::Null, options), "emit option").kind,
+            yaml::ErrorKind::Argument,
+        );
+    }
+    for indent in Vec::from_array([0, 9]) {
+        testing::assert_eq(
+            testing::expect_err(
+                yaml::emit_with_options(
+                    yaml::Value::Null,
+                    yaml::Options { indent, ..yaml::Options::standard() },
+                ),
+                "indent option",
+            ).kind,
+            yaml::ErrorKind::Argument,
+        );
+    }
+}
+
+#[test]
+fn punctuation_inside_plain_scalars_does_not_change_quoted_context() -> () {
+    for (source, key) in Vec::from_array(
+        [
+            ("don't: value", "don't"),
+            ("a \"quote: value", "a \"quote"),
+            ("&anchor don't: value", "don't"),
+            ("'a'': b': value", "a': b"),
+        ],
+    ) {
+        let parsed = testing::expect_ok(yaml::parse(source), "plain punctuation");
+        testing::assert_eq(
+            testing::expect_some(parsed.field(key), "mapping key"),
+            yaml::Value::String("value"),
+        );
+    }
+    testing::assert_eq(
+        testing::expect_ok(yaml::parse("'a'': b'"), "quoted punctuation"),
+        yaml::Value::String("a': b"),
+    );
+    testing::assert_eq(
+        testing::expect_ok(yaml::parse("[a,\n\tb]"), "flow whitespace"),
+        yaml::Value::Sequence(Vec::from_array([yaml::Value::String("a"), yaml::Value::String("b")])),
+    );
+}

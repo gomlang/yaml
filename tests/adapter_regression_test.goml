@@ -1,0 +1,283 @@
+package tests;
+
+use ecosystem::yaml;
+use std::testing;
+use std::text;
+
+#[test]
+fn adapter_core_schema_cases_remain_supported() -> () {
+    for (source, expected) in Vec::from_array(
+        [
+            ("yes", yaml::Value::String("yes")),
+            ("ON", yaml::Value::String("ON")),
+            ("2026-10-03", yaml::Value::String("2026-10-03")),
+            ("012", yaml::Value::Integer("12")),
+            ("0o17", yaml::Value::Integer("15")),
+            ("0xFF", yaml::Value::Integer("255")),
+            ("0b11", yaml::Value::String("0b11")),
+            ("1_000", yaml::Value::String("1_000")),
+            ("+.Inf", yaml::Value::Float(".inf")),
+            ("null", yaml::Value::Null),
+            ("1.25e+2", yaml::Value::Float("125.0")),
+            (".5", yaml::Value::Float("0.5")),
+            ("!!str 1e999", yaml::Value::String("1e999")),
+            ("!!str \"1e999\"", yaml::Value::String("1e999")),
+            ("! true", yaml::Value::String("true")),
+            ("﻿! true", yaml::Value::String("true")),
+            ("! 123", yaml::Value::String("123")),
+            ("! 1e999", yaml::Value::String("1e999")),
+            ("&anchor ! 123", yaml::Value::String("123")),
+            ("! &anchor 123", yaml::Value::String("123")),
+            ("&anchor\n! 123", yaml::Value::String("123")),
+            ("!!float 1", yaml::Value::Float("1.0")),
+            ("'! true'", yaml::Value::String("! true")),
+            ("|\n  ! true\n", yaml::Value::String("! true\n")),
+        ],
+    ) {
+        testing::assert_eq(
+            testing::expect_ok(yaml::parse(source), "core scalar " + source),
+            expected,
+        );
+    }
+}
+
+#[test]
+fn adapter_error_kinds_remain_stable() -> () {
+    for (source, expected) in Vec::from_array(
+        [
+            ("a: &a [*a]", yaml::ErrorKind::Alias),
+            ("---\na: &x 123\n---\nb: *x\n", yaml::ErrorKind::Alias),
+            ("a: 1\na: 2", yaml::ErrorKind::DuplicateKey),
+            ("+1: a\n01: b", yaml::ErrorKind::DuplicateKey),
+            ("-0.0: first\n0.0: second", yaml::ErrorKind::DuplicateKey),
+            (".nan: first\n.NaN: second", yaml::ErrorKind::DuplicateKey),
+            ("? [a, b]\n: value", yaml::ErrorKind::Unsupported),
+            ("!unknown value", yaml::ErrorKind::Unsupported),
+            ("!!bool yes", yaml::ErrorKind::Syntax),
+            ("!!int 0b10", yaml::ErrorKind::Syntax),
+            ("<<: {a: 1}", yaml::ErrorKind::Unsupported),
+            ("[unclosed", yaml::ErrorKind::Syntax),
+            ("a: *missing", yaml::ErrorKind::Syntax),
+            ("1e999", yaml::ErrorKind::Unsupported),
+        ],
+    ) {
+        testing::assert_eq(
+            testing::expect_err(yaml::parse(source), "failure " + source).kind,
+            expected,
+        );
+    }
+}
+
+#[test]
+fn line_endings_and_empty_anchor_properties_preserve_scalar_tags() -> () {
+    for source in Vec::from_array(
+        ["a: 1\rb: ! true\r", "%YAML 1.2\r---\ra: ! true\r", "a: 1\r\nb: ! true\r\n"],
+    ) {
+        let value = testing::expect_ok(yaml::parse(source), "line endings");
+        let key = if source.starts_with("%") {
+            "a"
+        } else {
+            "b"
+        };
+        testing::assert_eq(
+            testing::expect_some(value.field(key), "tagged field"),
+            yaml::Value::String("true"),
+        );
+    }
+    let value = testing::expect_ok(yaml::parse("first: &anchor\n! true: second\n"), "empty anchor");
+    testing::assert(value.field("first") == Option::Some(yaml::Value::Null));
+    testing::assert(value.field("true") == Option::Some(yaml::Value::String("second")));
+}
+
+#[test]
+fn directive_tokens_do_not_rewrite_scalar_content() -> () {
+    for source in Vec::from_array(
+        [
+            "%YAML 1.2\n---\nyes",
+            "# first\n%YAML 1.2 # core\n---\nyes",
+            "\ufeff%YAML 1.2\r\n---\r\nyes",
+            "%YAML 1.1\n---\nyes",
+        ],
+    ) {
+        testing::assert_eq(
+            testing::expect_ok(yaml::parse(source), "version directive"),
+            yaml::Value::String("yes"),
+        );
+    }
+    let source = "\"a\n%YAML 1.2\nb\"\n...\n%YAML 1.2\n---\n|\n  %YAML 1.2\n";
+    testing::assert(
+        testing::expect_ok(yaml::parse_documents(source), "literal directives")
+            == Vec::from_array(
+                [yaml::Value::String("a %YAML 1.2 b"), yaml::Value::String("%YAML 1.2\n")],
+            ),
+    );
+    for source in Vec::from_array(
+        ["%YAML 1.3\n---\na", "%YAML 1.2\n%YAML 1.2\n---\na", "%YAML 1.2junk\n---\na"],
+    ) {
+        let problem = testing::expect_err(yaml::parse(source), "invalid directive");
+        testing::assert_eq(problem.kind, yaml::ErrorKind::Syntax);
+        testing::assert_eq(problem.line, 0);
+        testing::assert_eq(problem.column, 0);
+    }
+}
+
+#[test]
+fn alias_bombs_numeric_ceilings_and_invalid_options_fail_with_limits() -> () {
+    let source = "a: &a [x,x,x,x,x,x,x,x,x,x]\nb: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a,*a]\nc: &c [*b,*b,*b,*b,*b,*b,*b,*b,*b,*b]\nd: [*c,*c,*c,*c,*c,*c,*c,*c,*c,*c]";
+    let options = yaml::Options {
+        limits: yaml::Limits { max_nodes: 1000, ..yaml::Limits::standard() },
+        ..yaml::Options::standard(),
+    };
+    testing::assert_eq(
+        testing::expect_err(yaml::parse_with_options(source, options), "alias bomb").kind,
+        yaml::ErrorKind::Limit,
+    );
+    testing::assert_eq(
+        testing::expect_err(yaml::parse(text::repeat("9", 4097)), "numeric ceiling").kind,
+        yaml::ErrorKind::Limit,
+    );
+    let invalid = yaml::Options {
+        limits: yaml::Limits { max_depth: 0, ..yaml::Limits::standard() },
+        ..yaml::Options::standard(),
+    };
+    testing::assert_eq(
+        testing::expect_err(yaml::parse_with_options("a", invalid), "invalid option").kind,
+        yaml::ErrorKind::Argument,
+    );
+    let problem = testing::expect_err(yaml::parse("unicode: 中\nunicode: value"), "unicode position");
+    testing::assert_eq(problem.line, 2);
+    testing::assert_eq(problem.column, 1);
+    testing::assert_eq(testing::expect_ok(yaml::emit_documents(Vec::new()), "empty emission"), "");
+}
+
+#[test]
+fn slash_escapes_preserve_styles_aliases_and_original_unicode_columns() -> () {
+    let source = "{unicode: \"中\", tagged: &a !<tag:yaml.org,2002:str> \"a\\/b\", alias: *a, plain: a\\/b, single: 'a\\/b', escaped: !<tag:yaml.org,2002:str> \"a\\\\/b\", \"a\\/b\": first, !<tag:yaml.org,2002:str> \"a\\/b\": second}";
+    let value = testing::expect_ok(
+        yaml::parse_with_options(
+            source,
+            yaml::Options {
+                duplicate_keys: yaml::DuplicateKeys::LastWins,
+                ..yaml::Options::standard(),
+            },
+        ),
+        "slash styles",
+    );
+    for (key, expected) in Vec::from_array(
+        [
+            ("unicode", "中"),
+            ("tagged", "a/b"),
+            ("alias", "a/b"),
+            ("plain", "a\\/b"),
+            ("single", "a\\/b"),
+            ("escaped", "a\\/b"),
+            ("a/b", "second"),
+        ],
+    ) {
+        testing::assert(value.field(key) == Option::Some(yaml::Value::String(expected)));
+    }
+    let prefix = "{unicode: \"中\", tagged: &a !<tag:yaml.org,2002:str> \"a\\/b\", alias: *a, plain: a\\/b, single: 'a\\/b', escaped: !<tag:yaml.org,2002:str> \"a\\\\/b\", \"a\\/b\": first, ";
+    let problem = testing::expect_err(yaml::parse(source), "original columns");
+    testing::assert_eq(problem.kind, yaml::ErrorKind::DuplicateKey);
+    testing::assert_eq(problem.line, 1);
+    testing::assert_eq(problem.column, prefix.char_count() + 1);
+    let source = "%YAML 1.2\n---\nquote: \"a\\/b\"\nblock: |\n  a\\/b\n...\n%YAML 1.2\n---\n\"c\\/d\"";
+    let docs = testing::expect_ok(yaml::parse_documents(source), "mixed styles and documents");
+    testing::assert_eq(docs.len(), 2);
+    testing::assert(docs[0].field("block") == Option::Some(yaml::Value::String("a\\/b\n")));
+    testing::assert_eq(docs[1], yaml::Value::String("c/d"));
+    for source in Vec::from_array(
+        [
+            "[\"a\\/b\", \"invalid\\q\"]",
+            "!<tag:yaml.org,2002:str> \"a\\/b\\q\"",
+            "!<tag:yaml.org,2002:str \"a\\/b\"",
+        ],
+    ) {
+        testing::assert_eq(
+            testing::expect_err(yaml::parse(source), "invalid escape/tag").kind,
+            yaml::ErrorKind::Syntax,
+        );
+    }
+}
+
+#[test]
+fn percent_encoded_verbatim_tags_and_float_original_spellings_remain_supported() -> () {
+    for source in Vec::from_array(
+        [
+            "!<tag:yaml.org%2C2002:str> \"a\\/b\"",
+            "\ufeff!<tag:yaml.org,2002:str> \"a\\/b\"",
+            "!<tag:yaml.org,2002:str> # comment\n  \"a\\/b\"",
+        ],
+    ) {
+        testing::assert_eq(
+            testing::expect_ok(yaml::parse(source), "verbatim tag"),
+            yaml::Value::String("a/b"),
+        );
+    }
+    for (source, expected) in Vec::from_array(
+        [("!!float +0", "0.0"), ("!!float 012", "12.0"), ("!!float -12", "-12.0")],
+    ) {
+        testing::assert_eq(
+            testing::expect_ok(yaml::parse(source), "float spelling"),
+            yaml::Value::Float(expected),
+        );
+    }
+    for policy in Vec::from_array([yaml::DuplicateKeys::FirstWins, yaml::DuplicateKeys::LastWins]) {
+        let value = testing::expect_ok(
+            yaml::parse_with_options(
+                "'<<': first\n! <<: second",
+                yaml::Options { duplicate_keys: policy, ..yaml::Options::standard() },
+            ),
+            "merge spelling duplicates",
+        );
+        testing::assert(
+            value.field("<<")
+                == Option::Some(
+                    yaml::Value::String(
+                        if policy == yaml::DuplicateKeys::FirstWins {
+                            "first"
+                        } else {
+                            "second"
+                        },
+                    ),
+                ),
+        );
+    }
+    testing::assert_eq(
+        testing::expect_err(yaml::parse("!!merge <<: {a: 1}"), "explicit merge").kind,
+        yaml::ErrorKind::Unsupported,
+    );
+}
+
+#[test]
+fn emitted_strings_are_quoted_and_invalid_integer_values_keep_syntax_errors() -> () {
+    let value = yaml::Value::Mapping(
+        Vec::from_array(
+            [
+                (yaml::Value::String("literal"), yaml::Value::String("yes")),
+                (yaml::Value::String("lines"), yaml::Value::String("a\nb\n")),
+            ],
+        ),
+    );
+    let wire = testing::expect_ok(yaml::emit(value), "adapter emission");
+    testing::assert(wire.contains("\"yes\""));
+    testing::assert(wire.contains("|"));
+    testing::assert_eq(testing::expect_ok(yaml::parse(wire), "adapter emission round trip"), value);
+    testing::assert_eq(
+        testing::expect_err(
+            yaml::emit(yaml::Value::Integer("not-number")),
+            "invalid emitted integer",
+        ).kind,
+        yaml::ErrorKind::Syntax,
+    );
+    for spelling in Vec::from_array(["-0", "-00"]) {
+        let wire = testing::expect_ok(
+            yaml::emit(yaml::Value::Float(spelling)),
+            "float emission spelling",
+        );
+        testing::assert_eq(
+            testing::expect_ok(yaml::parse(wire), "float emission sign"),
+            yaml::Value::Float("-0.0"),
+        );
+    }
+}

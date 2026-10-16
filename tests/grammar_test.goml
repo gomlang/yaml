@@ -1,0 +1,451 @@
+package tests;
+
+use ecosystem::yaml;
+use std::testing;
+use std::text;
+
+#[test]
+fn block_flow_tag_and_scalar_grammar_preserves_existing_results() -> () {
+    let failures = Vec::new();
+    for (source, expected) in Vec::from_array(
+        [
+            (">-\n  a\n\n  b\n", Vec::from_array([yaml::Value::String("a\nb")])),
+            (">-\n  a\n\n\n  b\n", Vec::from_array([yaml::Value::String("a\n\nb")])),
+            (">+\n\n  a\n\n", Vec::from_array([yaml::Value::String("\na\n\n")])),
+            ("|2-\n   a\n  b\n", Vec::from_array([yaml::Value::String(" a\nb")])),
+            ("|-\n  a\n  b", Vec::from_array([yaml::Value::String("a\nb")])),
+            (">\n  a\n  b", Vec::from_array([yaml::Value::String("a b")])),
+            ("|\n", Vec::from_array([yaml::Value::String("")])),
+            ("|+\n\n", Vec::from_array([yaml::Value::String("\n")])),
+            ("|-\n\n", Vec::from_array([yaml::Value::String("")])),
+            ("|\n\n", Vec::from_array([yaml::Value::String("")])),
+            (">2-\n  a\n    b\n  c\n", Vec::from_array([yaml::Value::String("a\n  b\nc")])),
+            (">2-\n  a\n\n    b\n\n  c\n", Vec::from_array([yaml::Value::String("a\n\n  b\n\nc")])),
+            (
+                "a:\n- b\n- c\nd: e",
+                Vec::from_array(
+                    [
+                        yaml::Value::Mapping(
+                            Vec::from_array(
+                                [
+                                    (
+                                        yaml::Value::String("a"),
+                                        yaml::Value::Sequence(
+                                            Vec::from_array(
+                                                [yaml::Value::String("b"), yaml::Value::String("c")],
+                                            ),
+                                        ),
+                                    ),
+                                    (yaml::Value::String("d"), yaml::Value::String("e")),
+                                ],
+                            ),
+                        ),
+                    ],
+                ),
+            ),
+            (
+                "- a: b\n  c: d\n- e: f",
+                Vec::from_array(
+                    [
+                        yaml::Value::Sequence(
+                            Vec::from_array(
+                                [
+                                    yaml::Value::Mapping(
+                                        Vec::from_array(
+                                            [
+                                                (yaml::Value::String("a"), yaml::Value::String("b")),
+                                                (yaml::Value::String("c"), yaml::Value::String("d")),
+                                            ],
+                                        ),
+                                    ),
+                                    yaml::Value::Mapping(
+                                        Vec::from_array(
+                                            [(yaml::Value::String("e"), yaml::Value::String("f"))],
+                                        ),
+                                    ),
+                                ],
+                            ),
+                        ),
+                    ],
+                ),
+            ),
+            (
+                "- - a\n  - b\n- c",
+                Vec::from_array(
+                    [
+                        yaml::Value::Sequence(
+                            Vec::from_array(
+                                [
+                                    yaml::Value::Sequence(
+                                        Vec::from_array(
+                                            [yaml::Value::String("a"), yaml::Value::String("b")],
+                                        ),
+                                    ),
+                                    yaml::Value::String("c"),
+                                ],
+                            ),
+                        ),
+                    ],
+                ),
+            ),
+            (
+                "[a: b, c: d]",
+                Vec::from_array(
+                    [
+                        yaml::Value::Sequence(
+                            Vec::from_array(
+                                [
+                                    yaml::Value::Mapping(
+                                        Vec::from_array(
+                                            [(yaml::Value::String("a"), yaml::Value::String("b"))],
+                                        ),
+                                    ),
+                                    yaml::Value::Mapping(
+                                        Vec::from_array(
+                                            [(yaml::Value::String("c"), yaml::Value::String("d"))],
+                                        ),
+                                    ),
+                                ],
+                            ),
+                        ),
+                    ],
+                ),
+            ),
+            (
+                "[a, b,]",
+                Vec::from_array(
+                    [
+                        yaml::Value::Sequence(
+                            Vec::from_array([yaml::Value::String("a"), yaml::Value::String("b")]),
+                        ),
+                    ],
+                ),
+            ),
+            (
+                "{a: 1,}",
+                Vec::from_array(
+                    [
+                        yaml::Value::Mapping(
+                            Vec::from_array([(yaml::Value::String("a"), yaml::Value::Integer("1"))]),
+                        ),
+                    ],
+                ),
+            ),
+            (
+                "[\"a\":b]",
+                Vec::from_array(
+                    [
+                        yaml::Value::Sequence(
+                            Vec::from_array(
+                                [
+                                    yaml::Value::Mapping(
+                                        Vec::from_array(
+                                            [(yaml::Value::String("a"), yaml::Value::String("b"))],
+                                        ),
+                                    ),
+                                ],
+                            ),
+                        ),
+                    ],
+                ),
+            ),
+            (
+                "{\"a\":b}",
+                Vec::from_array(
+                    [
+                        yaml::Value::Mapping(
+                            Vec::from_array([(yaml::Value::String("a"), yaml::Value::String("b"))]),
+                        ),
+                    ],
+                ),
+            ),
+            (
+                "? a\n  b\n: c\n  d",
+                Vec::from_array(
+                    [
+                        yaml::Value::Mapping(
+                            Vec::from_array(
+                                [(yaml::Value::String("a b"), yaml::Value::String("c d"))],
+                            ),
+                        ),
+                    ],
+                ),
+            ),
+            (
+                "?\n: value",
+                Vec::from_array(
+                    [
+                        yaml::Value::Mapping(
+                            Vec::from_array([(yaml::Value::Null, yaml::Value::String("value"))]),
+                        ),
+                    ],
+                ),
+            ),
+            (
+                "? ! <<\n: value",
+                Vec::from_array(
+                    [
+                        yaml::Value::Mapping(
+                            Vec::from_array(
+                                [(yaml::Value::String("<<"), yaml::Value::String("value"))],
+                            ),
+                        ),
+                    ],
+                ),
+            ),
+            (
+                "!!map {a: b}",
+                Vec::from_array(
+                    [
+                        yaml::Value::Mapping(
+                            Vec::from_array([(yaml::Value::String("a"), yaml::Value::String("b"))]),
+                        ),
+                    ],
+                ),
+            ),
+            (
+                "!!seq [a, b]",
+                Vec::from_array(
+                    [
+                        yaml::Value::Sequence(
+                            Vec::from_array([yaml::Value::String("a"), yaml::Value::String("b")]),
+                        ),
+                    ],
+                ),
+            ),
+            (
+                "! [a, b]",
+                Vec::from_array(
+                    [
+                        yaml::Value::Sequence(
+                            Vec::from_array([yaml::Value::String("a"), yaml::Value::String("b")]),
+                        ),
+                    ],
+                ),
+            ),
+            ("!!str |\n  123\n", Vec::from_array([yaml::Value::String("123\n")])),
+            (
+                "a: &a\nb: *a",
+                Vec::from_array(
+                    [
+                        yaml::Value::Mapping(
+                            Vec::from_array(
+                                [
+                                    (yaml::Value::String("a"), yaml::Value::Null),
+                                    (yaml::Value::String("b"), yaml::Value::Null),
+                                ],
+                            ),
+                        ),
+                    ],
+                ),
+            ),
+            (
+                "a: &x old\nb: &x new\nc: *x",
+                Vec::from_array(
+                    [
+                        yaml::Value::Mapping(
+                            Vec::from_array(
+                                [
+                                    (yaml::Value::String("a"), yaml::Value::String("old")),
+                                    (yaml::Value::String("b"), yaml::Value::String("new")),
+                                    (yaml::Value::String("c"), yaml::Value::String("new")),
+                                ],
+                            ),
+                        ),
+                    ],
+                ),
+            ),
+            (
+                "- &a {b: c}\n- *a",
+                Vec::from_array(
+                    [
+                        yaml::Value::Sequence(
+                            Vec::from_array(
+                                [
+                                    yaml::Value::Mapping(
+                                        Vec::from_array(
+                                            [(yaml::Value::String("b"), yaml::Value::String("c"))],
+                                        ),
+                                    ),
+                                    yaml::Value::Mapping(
+                                        Vec::from_array(
+                                            [(yaml::Value::String("b"), yaml::Value::String("c"))],
+                                        ),
+                                    ),
+                                ],
+                            ),
+                        ),
+                    ],
+                ),
+            ),
+            (
+                "%TAG !e! tag:yaml.org,2002:\n---\n!e!str 123",
+                Vec::from_array([yaml::Value::String("123")]),
+            ),
+            (
+                "%TAG ! tag:yaml.org,2002:\n---\n!str 123",
+                Vec::from_array([yaml::Value::String("123")]),
+            ),
+            ("\"a\n\n\nb\"", Vec::from_array([yaml::Value::String("a\n\nb")])),
+            ("'a\n\n\nb'", Vec::from_array([yaml::Value::String("a\n\nb")])),
+            ("\"a\\\n  b\"", Vec::from_array([yaml::Value::String("ab")])),
+            ("\"a\\\n\n  b\"", Vec::from_array([yaml::Value::String("a\nb")])),
+            (
+                "\"\\0\\a\\u0008\\t\\v\\u000c\\r\\e\\ \\N\\_\\L\\P\"",
+                Vec::from_array(
+                    [yaml::Value::String("\u0000\u0007\u0008\t\u000b\u000c\r\u001b    ")],
+                ),
+            ),
+            ("\"\\U0001f600\"", Vec::from_array([yaml::Value::String("😀")])),
+            (
+                "--- [a, b]\n...\n--- null",
+                Vec::from_array(
+                    [
+                        yaml::Value::Sequence(
+                            Vec::from_array([yaml::Value::String("a"), yaml::Value::String("b")]),
+                        ),
+                        yaml::Value::Null,
+                    ],
+                ),
+            ),
+            ("---\n...", Vec::from_array([yaml::Value::Null])),
+            (
+                "[a\n b]",
+                Vec::from_array(
+                    [yaml::Value::Sequence(Vec::from_array([yaml::Value::String("a b")]))],
+                ),
+            ),
+            ("a\n b\n\n c", Vec::from_array([yaml::Value::String("a b\nc")])),
+            (
+                "key: a\n  b\n\n  c",
+                Vec::from_array(
+                    [
+                        yaml::Value::Mapping(
+                            Vec::from_array(
+                                [(yaml::Value::String("key"), yaml::Value::String("a b\nc"))],
+                            ),
+                        ),
+                    ],
+                ),
+            ),
+            (
+                "- a\n  b",
+                Vec::from_array(
+                    [yaml::Value::Sequence(Vec::from_array([yaml::Value::String("a b")]))],
+                ),
+            ),
+            (
+                "[a b, c]",
+                Vec::from_array(
+                    [
+                        yaml::Value::Sequence(
+                            Vec::from_array([yaml::Value::String("a b"), yaml::Value::String("c")]),
+                        ),
+                    ],
+                ),
+            ),
+            ("!<tag:yaml.org%2C2002:str> 123", Vec::from_array([yaml::Value::String("123")])),
+            ("!!int -0", Vec::from_array([yaml::Value::Integer("0")])),
+            ("!!null \"\"", Vec::from_array([yaml::Value::Null])),
+        ],
+    ) {
+        match yaml::parse_documents(source) {
+            Result::Err(problem) => failures.push(
+                "grammar " + source + " failed: " + problem.to_string(),
+            ),
+            Result::Ok(actual) => if actual != expected {
+                failures.push(
+                    "grammar " + source + " expected "
+                        + testing::expect_ok(yaml::emit_documents(expected), "expected")
+                        + " actual "
+                        + testing::expect_ok(yaml::emit_documents(actual), "actual"),
+                );
+            },
+        }
+    }
+    if !failures.is_empty() {
+        testing::fail(text::join(failures, "\n"));
+    }
+}
+
+#[test]
+fn invalid_grammar_remains_recoverable() -> () {
+    let failures = Vec::new();
+    for (source, expected) in Vec::from_array(
+        [
+            ("{a: [b,c], empty: , : value}", yaml::ErrorKind::Syntax),
+            ("{a:[b,c]}", yaml::ErrorKind::Syntax),
+            ("{a:{b: c}}", yaml::ErrorKind::Syntax),
+            (": value", yaml::ErrorKind::Syntax),
+            ("&a [*a]", yaml::ErrorKind::Alias),
+            ("%TAG !! tag:example.test,2026:\n---\n!!str 123", yaml::ErrorKind::Unsupported),
+            ("...", yaml::ErrorKind::Syntax),
+            ("a\n...\nb", yaml::ErrorKind::Syntax),
+            ("\ta: b", yaml::ErrorKind::Syntax),
+            ("a:\n\tb: c", yaml::ErrorKind::Syntax),
+            ("[a: b: c]", yaml::ErrorKind::Syntax),
+            ("{a: b: c}", yaml::ErrorKind::Syntax),
+            ("a: \"b\" garbage", yaml::ErrorKind::Syntax),
+            ("!!float 1e999", yaml::ErrorKind::Unsupported),
+            ("!!float 1_0", yaml::ErrorKind::Syntax),
+        ],
+    ) {
+        match yaml::parse_documents(source) {
+            Result::Ok(_) => failures.push("invalid grammar accepted: " + source),
+            Result::Err(problem) => if problem.kind != expected {
+                failures.push("wrong error for " + source + ": " + problem.to_string());
+            },
+        }
+    }
+    if !failures.is_empty() {
+        testing::fail(text::join(failures, "\n"));
+    }
+}
+
+#[test]
+fn multiline_emission_preserves_leading_spaces_and_chomping_at_all_indents() -> () {
+    for indent in 1..9 {
+        for raw in Vec::from_array(
+            ["\n", " a\nb", "\n a\nb\n", "\n\n", "a\n\n\n", "a\n b", "\ta\nb\n"],
+        ) {
+            let value = yaml::Value::Mapping(
+                Vec::from_array([(yaml::Value::String("text"), yaml::Value::String(raw))]),
+            );
+            let wire = testing::expect_ok(
+                yaml::emit_with_options(
+                    value,
+                    yaml::Options { indent, ..yaml::Options::standard() },
+                ),
+                "multiline emit",
+            );
+            testing::assert_eq(testing::expect_ok(yaml::parse(wire), "multiline parse"), value);
+        }
+    }
+}
+
+#[test]
+fn wide_flow_sequences_and_escaped_slashes_remain_bounded_and_linear() -> () {
+    for item in Vec::from_array(["x,", "\"a\\/b\","]) {
+        let source = "[" + text::repeat(item, 10000) + "end]";
+        let values = testing::expect_some(
+            testing::expect_ok(yaml::parse(source), "wide flow").as_sequence(),
+            "sequence",
+        );
+        testing::assert_eq(values.len(), 10001);
+        testing::assert_eq(values[10000], yaml::Value::String("end"));
+    }
+}
+
+#[test]
+fn long_mapping_keys_emit_explicit_key_notation() -> () {
+    for key in Vec::from_array(
+        [text::repeat("k", 1025), text::repeat("\n", 600), text::repeat("中", 1025)],
+    ) {
+        let value = yaml::Value::Mapping(
+            Vec::from_array([(yaml::Value::String(key), yaml::Value::String("value"))]),
+        );
+        let wire = testing::expect_ok(yaml::emit(value), "long key emission");
+        testing::assert(wire.starts_with("? "));
+        testing::assert_eq(testing::expect_ok(yaml::parse(wire), "explicit long key"), value);
+    }
+}
