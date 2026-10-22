@@ -70,8 +70,34 @@ fn location(parser: Parser, position: isize) -> (isize, isize) {
     (low + 1, column)
 }
 
-fn syntax(message: string) -> Error {
-    error(ErrorKind::Syntax, message)
+fn syntax(parser: Parser, message: string) -> Error {
+    let (line, column) = location(parser, parser.position.get());
+    Error { kind: ErrorKind::Syntax, message, line, column }
+}
+
+fn source_syntax(input: string, position: isize, message: string) -> Error {
+    let mut line = 1;
+    let mut column = 1;
+    let mut offset = 0;
+    while offset < position {
+        let Some((c, width)) = input.decode_at(offset) else {
+            break
+        };
+        if c == '\r' {
+            line += 1;
+            column = 1;
+            if offset + 1 < position && byte_character(input, offset + 1) == '\n' {
+                offset += 1;
+            }
+        } else if c == '\n' {
+            line += 1;
+            column = 1;
+        } else if offset != 0 || c != '\ufeff' {
+            column += 1;
+        }
+        offset += width;
+    }
+    Error { kind: ErrorKind::Syntax, message, line, column }
 }
 
 fn at_node(problem: Error, node: Node) -> Error {
@@ -204,18 +230,18 @@ fn read_name(parser: Parser) -> string {
     parser.source.byte_slice(start, parser.position.get())
 }
 
-fn decode_tag(value: string) -> Result[string, Error] {
+fn decode_tag(parser: Parser, value: string) -> Result[string, Error] {
     let bytes = Vec::new();
     let mut i = 0;
     while i < value.byte_len() {
         if byte_character(value, i) == '%' {
             if i + 2 >= value.byte_len() {
-                return Result::Err(syntax("invalid YAML tag URI escape"))
+                return Result::Err(syntax(parser, "invalid YAML tag URI escape"))
             }
             let a = digit(byte_character(value, i + 1));
             let b = digit(byte_character(value, i + 2));
             if a < 0 || b < 0 {
-                return Result::Err(syntax("invalid YAML tag URI escape"))
+                return Result::Err(syntax(parser, "invalid YAML tag URI escape"))
             }
             bytes.push((a * 16 + b).to_u8());
             i += 3;
@@ -226,7 +252,7 @@ fn decode_tag(value: string) -> Result[string, Error] {
     }
     let (valid, decoded) = string_from_utf8(bytes);
     if !valid {
-        return Result::Err(syntax("YAML tag URI must be UTF-8"))
+        return Result::Err(syntax(parser, "YAML tag URI must be UTF-8"))
     }
     Result::Ok(
         if decoded.starts_with("tag:yaml.org,2002:") {
@@ -247,11 +273,11 @@ fn read_tag(parser: Parser) -> Result[string, Error] {
             advance(parser);
         }
         if peek(parser) != '>' {
-            return Result::Err(syntax("unterminated YAML verbatim tag"))
+            return Result::Err(syntax(parser, "unterminated YAML verbatim tag"))
         }
         let value = parser.source.byte_slice(from, parser.position.get());
         advance(parser);
-        return decode_tag(value)
+        return decode_tag(parser, value)
     }
     read_name(parser);
     let tag = parser.source.byte_slice(start, parser.position.get());
@@ -260,7 +286,7 @@ fn read_tag(parser: Parser) -> Result[string, Error] {
     }
     if tag.starts_with("!!") {
         let prefix = parser.handles.get("!!").unwrap_or("tag:yaml.org,2002:");
-        return decode_tag(prefix + tag.byte_slice(2, tag.byte_len()))
+        return decode_tag(parser, prefix + tag.byte_slice(2, tag.byte_len()))
     }
     let mut handle_end = 0;
     for i in 1..tag.byte_len() {
@@ -272,14 +298,14 @@ fn read_tag(parser: Parser) -> Result[string, Error] {
     if handle_end > 0 {
         let handle = tag.byte_slice(0, handle_end);
         let Some(prefix) = parser.handles.get(handle) else {
-            return Result::Err(syntax("undefined YAML tag handle"))
+            return Result::Err(syntax(parser, "undefined YAML tag handle"))
         };
-        decode_tag(prefix + tag.byte_slice(handle_end, tag.byte_len()))
+        decode_tag(parser, prefix + tag.byte_slice(handle_end, tag.byte_len()))
     } else {
         if let Some(prefix) = parser.handles.get("!") {
-            decode_tag(prefix + tag.byte_slice(1, tag.byte_len()))
+            decode_tag(parser, prefix + tag.byte_slice(1, tag.byte_len()))
         } else {
-            decode_tag(tag)
+            decode_tag(parser, tag)
         }
     }
 }
@@ -316,19 +342,19 @@ fn escaped_character(parser: Parser) -> Result[string, Error] {
             for _ in 0..count {
                 let n = digit(advance(parser));
                 if n < 0 {
-                    return Result::Err(syntax("invalid YAML Unicode escape"))
+                    return Result::Err(syntax(parser, "invalid YAML Unicode escape"))
                 }
                 if code > 0x10ffff / 16 {
-                    return Result::Err(syntax("invalid YAML Unicode scalar"))
+                    return Result::Err(syntax(parser, "invalid YAML Unicode scalar"))
                 }
                 code = code * 16 + n.to_u32();
             }
             let Some(character) = char_from_u32(code) else {
-                return Result::Err(syntax("invalid YAML Unicode scalar"))
+                return Result::Err(syntax(parser, "invalid YAML Unicode scalar"))
             };
             character.to_string()
         },
-        _ => return Result::Err(syntax("unknown YAML escape character")),
+        _ => return Result::Err(syntax(parser, "unknown YAML escape character")),
     };
     Result::Ok(value)
 }
@@ -339,11 +365,11 @@ fn quoted_scalar(parser: Parser) -> Result[string, Error] {
     let pending = text::StringBuilder::new();
     loop {
         if marker(parser, "---") || marker(parser, "...") {
-            return Result::Err(syntax("document marker inside YAML quoted scalar"))
+            return Result::Err(syntax(parser, "document marker inside YAML quoted scalar"))
         }
         let c = advance(parser);
         if c == '\u0000' {
-            return Result::Err(syntax("unterminated YAML quoted scalar"))
+            return Result::Err(syntax(parser, "unterminated YAML quoted scalar"))
         }
         if c == quote {
             if quote == '\'' && peek(parser) == '\'' {
@@ -488,12 +514,12 @@ fn block_scalar(parser: Parser, parent_indent: isize) -> Result[string, Error] {
         let c = peek(parser);
         if c == '+' || c == '-' {
             if chomp != ' ' {
-                return Result::Err(syntax("duplicate YAML chomping indicator"))
+                return Result::Err(syntax(parser, "duplicate YAML chomping indicator"))
             }
             chomp = advance(parser);
         } else if c >= '1' && c <= '9' {
             if amount != 0 {
-                return Result::Err(syntax("duplicate YAML indentation indicator"))
+                return Result::Err(syntax(parser, "duplicate YAML indentation indicator"))
             }
             amount = digit(advance(parser));
         } else {
@@ -507,7 +533,7 @@ fn block_scalar(parser: Parser, parent_indent: isize) -> Result[string, Error] {
         }
     }
     if peek(parser) != '\n' && peek(parser) != '\u0000' {
-        return Result::Err(syntax("invalid YAML block scalar header"))
+        return Result::Err(syntax(parser, "invalid YAML block scalar header"))
     }
     if peek(parser) == '\n' {
         advance(parser);
@@ -555,7 +581,7 @@ fn block_scalar(parser: Parser, parent_indent: isize) -> Result[string, Error] {
         indent = baseline + 1;
     }
     if amount == 0 && leading > indent {
-        return Result::Err(syntax("leading block scalar whitespace exceeds indentation"))
+        return Result::Err(syntax(parser, "leading block scalar whitespace exceeds indentation"))
     }
     let lines = Vec::new();
     let breaks = Vec::new();
@@ -568,7 +594,7 @@ fn block_scalar(parser: Parser, parent_indent: isize) -> Result[string, Error] {
         let spaces = content - start;
         let empty = character(parser, content) == '\n' || character(parser, content) == '\u0000';
         if spaces < indent && character(parser, content) == '\t' {
-            return Result::Err(syntax("tabs cannot indent YAML block scalars"))
+            return Result::Err(syntax(parser, "tabs cannot indent YAML block scalars"))
         }
         if !empty && spaces < indent {
             break
@@ -641,7 +667,7 @@ fn parse_flow(parser: Parser, index: isize, depth: isize) -> Result[(), Error] {
     skip(parser);
     while peek(parser) != closing {
         if peek(parser) == '\u0000' {
-            return Result::Err(syntax("unterminated YAML flow collection"))
+            return Result::Err(syntax(parser, "unterminated YAML flow collection"))
         }
         let explicit = indicator(parser, '?');
         if explicit {
@@ -649,7 +675,7 @@ fn parse_flow(parser: Parser, index: isize, depth: isize) -> Result[(), Error] {
             skip(parser);
         }
         if peek(parser) == ':' && !explicit {
-            return Result::Err(syntax("expected YAML mapping key"))
+            return Result::Err(syntax(parser, "expected YAML mapping key"))
         }
         let key = if peek(parser) == ':'
             || (explicit && (peek(parser) == closing || peek(parser) == ',')) {
@@ -660,7 +686,7 @@ fn parse_flow(parser: Parser, index: isize, depth: isize) -> Result[(), Error] {
         skip(parser);
         if peek(parser) == ':' {
             if !explicit && parser.nodes[key].line != location(parser, parser.position.get()).0 {
-                return Result::Err(syntax("implicit YAML flow keys must stay on one line"))
+                return Result::Err(syntax(parser, "implicit YAML flow keys must stay on one line"))
             }
             advance(parser);
             skip(parser);
@@ -701,7 +727,7 @@ fn parse_flow(parser: Parser, index: isize, depth: isize) -> Result[(), Error] {
             break
         }
         if peek(parser) != ',' {
-            return Result::Err(syntax("expected comma in YAML flow collection"))
+            return Result::Err(syntax(parser, "expected comma in YAML flow collection"))
         }
         advance(parser);
         skip(parser);
@@ -731,7 +757,7 @@ fn block_value(parser: Parser, indent: isize, depth: isize, indentless: bool, co
     }
     if !compact && peek(parser) != '\n'
         && (indicator(parser, '-') || indicator(parser, '?') || line_mapping(parser)) {
-        return Result::Err(syntax("block collections in mapping values require a new line"))
+        return Result::Err(syntax(parser, "block collections in mapping values require a new line"))
     }
     if peek(parser) == '\n' {
         let saved = parser.position.get();
@@ -754,13 +780,13 @@ fn block_value(parser: Parser, indent: isize, depth: isize, indentless: bool, co
 fn check_block_collection_start(parser: Parser) -> Result[(), Error] {
     if location(parser, parser.position.get()).0 == parser.inline_document {
         return Result::Err(
-            syntax("block collections cannot follow document markers on the same line"),
+            syntax(parser, "block collections cannot follow document markers on the same line"),
         )
     }
     let mut previous = parser.position.get() - 1;
     while previous >= 0 {
         if byte_character(parser.source, previous) == '\t' {
-            return Result::Err(syntax("tabs cannot indent YAML block collections"))
+            return Result::Err(syntax(parser, "tabs cannot indent YAML block collections"))
         }
         if byte_character(parser.source, previous) != ' ' {
             break
@@ -807,7 +833,7 @@ fn parse_block_mapping(parser: Parser, index: isize, indent: isize, depth: isize
                 empty_node(parser, parser.position.get())?
             }
         } else if indicator(parser, ':') {
-            return Result::Err(syntax("expected YAML mapping key"))
+            return Result::Err(syntax(parser, "expected YAML mapping key"))
         } else {
             parse_node(parser, indent, false, explicit, !explicit, depth + 1, false)?
         };
@@ -821,7 +847,7 @@ fn parse_block_mapping(parser: Parser, index: isize, indent: isize, depth: isize
         } else if explicit {
             empty_node(parser, parser.position.get())?
         } else {
-            return Result::Err(syntax("expected colon in YAML block mapping"))
+            return Result::Err(syntax(parser, "expected colon in YAML block mapping"))
         };
         children.push(key);
         children.push(value);
@@ -856,7 +882,7 @@ fn parse_node(
         leading += 1;
     }
     if !flow && character(parser, leading) == '\t' {
-        return Result::Err(syntax("tabs cannot indent YAML nodes"))
+        return Result::Err(syntax(parser, "tabs cannot indent YAML nodes"))
     }
     let indent = column - 1;
     if block && !flow && !indicator(parser, '-')
@@ -869,28 +895,28 @@ fn parse_node(
     while peek(parser) == '&' || peek(parser) == '!' {
         if peek(parser) == '&' {
             if anchored {
-                return Result::Err(syntax("duplicate YAML anchor property"))
+                return Result::Err(syntax(parser, "duplicate YAML anchor property"))
             }
             anchored = true;
             advance(parser);
             let name = read_name(parser);
             if name == "" {
-                return Result::Err(syntax("empty YAML anchor name"))
+                return Result::Err(syntax(parser, "empty YAML anchor name"))
             }
             if !blank(peek(parser))
                 && !(flow && (peek(parser) == ',' || peek(parser) == ']' || peek(parser) == '}')) {
-                return Result::Err(syntax("YAML anchor properties require separation"))
+                return Result::Err(syntax(parser, "YAML anchor properties require separation"))
             }
             parser.anchors.set(name, index);
             parser.previous_anchors.set(name, true);
         } else {
             if tag != "" {
-                return Result::Err(syntax("duplicate YAML tag property"))
+                return Result::Err(syntax(parser, "duplicate YAML tag property"))
             }
             tag = read_tag(parser)?;
             if !blank(peek(parser))
                 && !(flow && (peek(parser) == ',' || peek(parser) == ']' || peek(parser) == '}')) {
-                return Result::Err(syntax("YAML tag properties require separation"))
+                return Result::Err(syntax(parser, "YAML tag properties require separation"))
             }
         }
         horizontal(parser);
@@ -924,7 +950,7 @@ fn parse_node(
     }
     if !flow && block && indicator(parser, '-') && (anchored || tag != "")
         && location(parser, parser.position.get()).0 == line {
-        return Result::Err(syntax("block sequence properties require a new line"))
+        return Result::Err(syntax(parser, "block sequence properties require a new line"))
     }
     if (tag != "" || anchored)
         && ((key && indicator(parser, ':'))
@@ -932,7 +958,7 @@ fn parse_node(
         return Result::Ok(index)
     }
     if flow && (marker(parser, "---") || marker(parser, "...")) {
-        return Result::Err(syntax("document marker inside YAML flow collection"))
+        return Result::Err(syntax(parser, "document marker inside YAML flow collection"))
     }
     if peek(parser) == '*' {
         advance(parser);
@@ -959,7 +985,7 @@ fn parse_node(
             },
         };
         if anchored || tag != "" {
-            return Result::Err(syntax("YAML aliases cannot have node properties"))
+            return Result::Err(syntax(parser, "YAML aliases cannot have node properties"))
         }
         parser.nodes[index] = Node { kind: "alias", target, ..parser.nodes[index] };
     } else if peek(parser) == '[' || peek(parser) == '{' {
@@ -977,11 +1003,11 @@ fn parse_node(
     } else if peek(parser) != '\n' && peek(parser) != '\u0000' && peek(parser) != '#' {
         if peek(parser) == '@' || peek(parser) == '`' || peek(parser) == '%' || peek(parser) == ','
             || (!flow && (peek(parser) == ']' || peek(parser) == '}')) {
-            return Result::Err(syntax("invalid YAML scalar indicator"))
+            return Result::Err(syntax(parser, "invalid YAML scalar indicator"))
         }
         let value = plain_scalar(parser, parent_indent, flow, key)?;
         if value == "" {
-            return Result::Err(syntax("expected YAML scalar"))
+            return Result::Err(syntax(parser, "expected YAML scalar"))
         }
         parser.nodes[index] = Node { value, ..parser.nodes[index] };
     }
@@ -1130,22 +1156,22 @@ fn directive(parser: Parser, version: Ref[bool]) -> Result[(), Error] {
         advance(parser);
     }
     let words = text::fields(parser.source.byte_slice(start, parser.position.get()), 16).map_err(
-        |_| syntax("invalid YAML directive"),
+        |_| syntax(parser, "invalid YAML directive"),
     )?;
     if words.len() == 0 {
-        return Result::Err(syntax("invalid YAML directive"))
+        return Result::Err(syntax(parser, "invalid YAML directive"))
     }
     if words[0] == "%YAML" {
         if version.get() || words.len() != 2 || (words[1] != "1.1" && words[1] != "1.2") {
-            return Result::Err(syntax("invalid or repeated YAML version directive"))
+            return Result::Err(syntax(parser, "invalid or repeated YAML version directive"))
         }
         version.set(true);
     } else if words[0] == "%TAG" {
         if words.len() != 3 || !words[1].starts_with("!") || !words[1].ends_with("!") {
-            return Result::Err(syntax("invalid YAML tag directive"))
+            return Result::Err(syntax(parser, "invalid YAML tag directive"))
         }
         if parser.handles.get(words[1]).is_some() {
-            return Result::Err(syntax("duplicate YAML tag directive"))
+            return Result::Err(syntax(parser, "duplicate YAML tag directive"))
         }
         parser.handles.set(words[1], words[2]);
     }
@@ -1162,7 +1188,7 @@ pub fn parse_documents_with_options(input: string, options: Options) -> Result[V
     let mut offset = 0;
     while offset < input.byte_len() {
         let Some((c, width)) = input.decode_at(offset) else {
-            return Result::Err(syntax("YAML input must be UTF-8"))
+            return Result::Err(source_syntax(input, offset, "YAML input must be UTF-8"))
         };
         if c == '\u0085' || c == '\u2028' || c == '\u2029' {
             return Result::Err(
@@ -1176,7 +1202,7 @@ pub fn parse_documents_with_options(input: string, options: Options) -> Result[V
         if (code < 32 && c != '\t' && c != '\n' && c != '\r') || (code >= 127 && code <= 159)
             || code == 0xfffe
             || code == 0xffff {
-            return Result::Err(syntax("invalid YAML source character"))
+            return Result::Err(source_syntax(input, offset, "invalid YAML source character"))
         }
         if offset == 0 && c == '\ufeff' {
             offset += width;
@@ -1239,7 +1265,7 @@ pub fn parse_documents_with_options(input: string, options: Options) -> Result[V
             ..document,
         };
         if directives && !explicit {
-            return Result::Err(syntax("YAML directives require a document start marker"))
+            return Result::Err(syntax(parser, "YAML directives require a document start marker"))
         }
         if explicit {
             document.position.set(document.position.get() + 3);
@@ -1249,7 +1275,7 @@ pub fn parse_documents_with_options(input: string, options: Options) -> Result[V
             return Result::Err(error(ErrorKind::Limit, "YAML stream exceeds max_documents"))
         }
         if !explicit && marker(document, "...") {
-            return Result::Err(syntax("unexpected YAML document end marker"))
+            return Result::Err(syntax(parser, "unexpected YAML document end marker"))
         }
         let root = if peek(document) == '\u0000' || marker(document, "---")
             || marker(document, "...") {
@@ -1263,14 +1289,14 @@ pub fn parse_documents_with_options(input: string, options: Options) -> Result[V
             document.position.set(document.position.get() + 3);
             horizontal(document);
             if peek(document) != '\n' && peek(document) != '\u0000' && peek(document) != '#' {
-                return Result::Err(syntax("invalid YAML document end marker"))
+                return Result::Err(syntax(parser, "invalid YAML document end marker"))
             }
             skip(document);
             if peek(document) != '\u0000' && !marker(document, "---") && peek(document) != '%' {
-                return Result::Err(syntax("expected YAML document start marker"))
+                return Result::Err(syntax(parser, "expected YAML document start marker"))
             }
         } else if peek(document) != '\u0000' && !marker(document, "---") {
-            return Result::Err(syntax("unexpected content after YAML document"))
+            return Result::Err(syntax(parser, "unexpected content after YAML document"))
         }
     }
     Result::Ok(documents)

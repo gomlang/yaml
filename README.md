@@ -110,3 +110,11 @@ goml run --example basic
 ```
 
 Use an isolated ecosystem registry containing `ecosystem::config` for consumer tests. The ecosystem verification runner provisions it. GoML tests compare all 36 pinned official YAML test-suite fixtures against their independent JSON results and retain 20 additional official syntax regressions; see [fixture provenance and license](tests/data/reference/README.md). Additional tests cover core-schema differences, explicit/non-specific tags, alias bombs and cycles, every configurable budget, duplicate-key policy, source positions, Unicode/BOM/line endings, normalization, invalid dynamic values, bounded emission, and typed configuration integration.
+
+Grammar and scanning errors now carry one-based detection-point `line` and
+`column` coordinates, including unterminated input. EOF is the position just
+past the final character (column 1 of the following line after a line break).
+Columns count Unicode scalar values; an initial BOM is zero-width, and CRLF or
+bare CR counts as one line break. Semantic node coordinates are unchanged.
+Argument and resource-limit errors without a source detection point can retain
+zero coordinates.
