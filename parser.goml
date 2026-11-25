@@ -422,6 +422,31 @@ fn quoted_scalar(parser: Parser) -> Result[string, Error] {
     }
 }
 
+fn plain_scalar_end(parser: Parser, c: char, start: isize, flow: bool) -> bool {
+    if c == '\u0000' || (flow && (c == ',' || c == '[' || c == ']' || c == '{' || c == '}')) {
+        return true
+    }
+    if c == ':'
+        && (blank(character(parser, parser.position.get() + 1))
+            || (flow
+                && (character(parser, parser.position.get() + 1) == ','
+                    || character(parser, parser.position.get() + 1) == ']'
+                    || character(parser, parser.position.get() + 1) == '}'))) {
+        return true
+    }
+    c == '#'
+        && (parser.position.get() == start
+            || blank(byte_character(parser.source, parser.position.get() - 1)))
+}
+
+fn plain_continuation_end(parser: Parser, parent_indent: isize, flow: bool, column: isize) -> bool {
+    let c = peek(parser);
+    c == '\u0000' || c == '#' || marker(parser, "---") || marker(parser, "...")
+        || (flow && (c == ',' || c == ']' || c == '}' || c == ':' || c == '[' || c == '{'))
+        || (!flow && column - 1 <= parent_indent)
+        || (!flow && line_mapping(parser))
+}
+
 fn plain_scalar(parser: Parser, parent_indent: isize, flow: bool, key: bool) -> Result[
     string,
     Error,
@@ -431,20 +456,7 @@ fn plain_scalar(parser: Parser, parent_indent: isize, flow: bool, key: bool) -> 
     let mut end = start;
     loop {
         let c = peek(parser);
-        if c == '\u0000' || (flow && (c == ',' || c == '[' || c == ']' || c == '{' || c == '}')) {
-            break
-        }
-        if c == ':'
-            && (blank(character(parser, parser.position.get() + 1))
-                || (flow
-                    && (character(parser, parser.position.get() + 1) == ','
-                        || character(parser, parser.position.get() + 1) == ']'
-                        || character(parser, parser.position.get() + 1) == '}'))) {
-            break
-        }
-        if c == '#'
-            && (parser.position.get() == start
-                || blank(byte_character(parser.source, parser.position.get() - 1))) {
+        if plain_scalar_end(parser, c, start, flow) {
             break
         }
         if c == '\n' {
@@ -460,15 +472,7 @@ fn plain_scalar(parser: Parser, parent_indent: isize, flow: bool, key: bool) -> 
                 horizontal(parser);
             }
             let (next_line, col) = location(parser, parser.position.get());
-            if peek(parser) == '\u0000' || peek(parser) == '#' || marker(parser, "---")
-                || marker(parser, "...")
-                || (flow
-                    && (peek(parser) == ',' || peek(parser) == ']' || peek(parser) == '}'
-                        || peek(parser) == ':'
-                        || peek(parser) == '['
-                        || peek(parser) == '{'))
-                || (!flow && col - 1 <= parent_indent)
-                || (!flow && line_mapping(parser)) {
+            if plain_continuation_end(parser, parent_indent, flow, col) {
                 parser.position.set(saved);
                 break
             }

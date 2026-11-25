@@ -1,0 +1,34 @@
+package tests;
+
+use ecosystem::yaml;
+use std::testing;
+use std::text;
+
+#[test]
+fn scalar_resolution_preserves_limits_and_tag_error_order() -> () {
+    let oversized = text::repeat("9", 4097);
+    for source in Vec::from_array(
+        ["\"" + oversized + "\"", "'" + oversized + "'", "! " + oversized, "!!str " + oversized],
+    ) {
+        testing::assert_eq(
+            testing::expect_ok(yaml::parse(source), "string scalar bypasses numeric limit"),
+            yaml::Value::String(oversized),
+        );
+    }
+    for prefix in Vec::from_array(["", "!!bool ", "!!int ", "!unknown "]) {
+        let problem = testing::expect_err(
+            yaml::parse(prefix + oversized),
+            "numeric limit precedes tag validation",
+        );
+        testing::assert_eq(problem.kind, yaml::ErrorKind::Limit);
+        testing::assert_eq(problem.message, "YAML numeric scalar exceeds 4096 bytes");
+    }
+    for prefix in Vec::from_array(["", "!!bool ", "!!int ", "!unknown "]) {
+        let problem = testing::expect_err(
+            yaml::parse(prefix + "1e999"),
+            "numeric normalization precedes tag validation",
+        );
+        testing::assert_eq(problem.kind, yaml::ErrorKind::Unsupported);
+        testing::assert_eq(problem.message, "YAML float exceeds finite float64 range");
+    }
+}
